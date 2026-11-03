@@ -388,14 +388,7 @@
         }
         if (!(await loadMe())) return showErr('관리자 설정에 실패했습니다. 다시 시도하세요');
         await afterLogin();
-        confirmBox(
-          '관리자 계정이 만들어졌습니다 🎉',
-          `<p>아이디 <b>${esc(username)}</b> 로 로그인되었습니다.</p>
-           <p><b>마지막으로 꼭 해주세요:</b><br>Supabase 대시보드 → Authentication → Sign In / Providers →
-           <b>'Allow new users to sign up' 끄기</b><br>
-           <span class="hint">(끄지 않으면 아무나 가입은 할 수 있어요. 데이터는 못 보지만 깔끔하게 막아두세요)</span></p>`,
-          '확인했어요'
-        );
+        toast(`관리자 계정(${username})이 만들어졌습니다`);
       });
     };
   }
