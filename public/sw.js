@@ -1,6 +1,6 @@
 // 앱 화면 파일을 캐시해서 설치형 앱처럼 빠르게 열리도록 함.
 // 상품 데이터/사진(Supabase)은 캐시하지 않고 항상 최신으로 가져옴.
-const CACHE = 'vintage-v10';
+const CACHE = 'vintage-v11';
 const SHELL = ['./', './index.html', './style.css', './app.js', './config.js', './vendor/supabase-2.118.0.js', './manifest.webmanifest', './icons/icon-192.png'];
 
 self.addEventListener('install', (e) => {

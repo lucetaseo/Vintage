@@ -424,6 +424,7 @@
           await sb.auth.signOut();
           return ($('#loginErr').textContent = '등록되지 않았거나 비활성화된 계정입니다');
         }
+        goHome();
         await afterLogin();
       });
     };
@@ -487,6 +488,7 @@
           return renderLogin(errText(e2));
         }
         if (!(await loadMe())) return showErr('관리자 설정에 실패했습니다. 다시 시도하세요');
+        goHome();
         await afterLogin();
         toast(`총관리자 계정(${username})이 만들어졌습니다`);
       });
@@ -496,6 +498,11 @@
   async function loadSettings() {
     const { data } = await sb.from('app_settings').select('*').eq('id', 1).maybeSingle();
     state.settings = data || { points_enabled: true, point_rate: 1, point_min_use: 1000 };
+  }
+
+  // 로그인/로그아웃 시 이전 화면(예: 내정보)으로 가지 않고 기본 화면으로 (캐셔는 자동으로 상품 판매)
+  function goHome() {
+    if (location.hash && location.hash !== '#/') history.replaceState(null, '', `${location.pathname}${location.search}#/`);
   }
 
   async function afterLogin() {
@@ -3482,6 +3489,7 @@
   sb.auth.onAuthStateChange((event) => {
     if (event === 'SIGNED_OUT') {
       state.me = null;
+      goHome();
       stopRealtime();
       renderLogin();
     }
