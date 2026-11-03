@@ -358,6 +358,7 @@
         <nav class="nav">
           ${link('#/', 'list', '상품목록')}
           ${link('#/new', 'new', '+ 등록')}
+          ${link('#/scan', 'scan', '스캔')}
           ${isAdmin() ? link('#/admin', 'admin', '관리자') : ''}
           ${isSuper() ? link('#/license', 'license', '이용관리') : ''}
           ${link('#/account', 'account', '내정보')}
@@ -524,6 +525,7 @@
          <input type="search" class="search" id="q" placeholder="상품코드 / 이름 검색 (다른 매장 재고 확인)" value="${esc(f.q)}" autocomplete="off" enterkeyhint="search">
          <div class="seg" id="seg">${seg('available', '판매중')}${seg('sold', '판매완료')}${seg('all', '전체')}</div>
          <a class="btn primary addbtn" href="#/new">+ 상품 등록</a>
+         <a class="btn addbtn" href="#/scan">📷 스캔</a>
        </div>
        <div id="lookup"></div>
        <div class="grid" id="grid"></div>
@@ -543,7 +545,14 @@
       if (e.key === 'Enter') {
         clearTimeout(t);
         state.filter.q = q.value.trim();
-        loadList(true);
+        // 바코드 스캐너로 찍으면(코드 + Enter) 해당 상품 화면으로 바로 이동
+        const code = normCode(q.value);
+        if (code) {
+          sb.from('products').select('id').eq('code', code).maybeSingle().then(({ data }) => {
+            if (data) location.hash = `#/p/${data.id}`;
+            else loadList(true);
+          });
+        } else loadList(true);
         q.blur();
       }
     };
@@ -664,6 +673,7 @@
             <div class="actions">
               ${manage && !sold ? `<button class="btn sell block" id="sellBtn">판매 처리</button>` : ''}
               ${manage && sold ? `<button class="btn block" id="unsellBtn">판매 취소 (되돌리기)</button>` : ''}
+              <a class="btn" href="#/labels?ids=${p.id}" style="text-align:center;text-decoration:none">🏷 라벨 출력 (QR · 바코드)</a>
               ${manage ? `<button class="btn" id="editBtn">수정 / 매장 이동</button>` : ''}
               ${isAdmin() ? `<button class="btn danger" id="delBtn">삭제</button>` : ''}
             </div>
@@ -721,7 +731,7 @@
   }
 
   // ---------------- 상품 등록 / 수정 ----------------
-  async function viewForm(id) {
+  async function viewForm(id, presetCode = '') {
     state.view = 'form';
     let p = null;
     if (id) {
@@ -747,7 +757,7 @@
           <span id="pickLabel">${p ? '' : '📷 사진 찍기 / 선택'}</span>
         </label>
         <label class="field"><span>상품코드 *</span>
-          <div class="row"><input type="text" name="code" required value="${esc(p?.code || '')}" autocapitalize="characters">
+          <div class="row"><input type="text" name="code" required value="${esc(p?.code || presetCode)}" autocapitalize="characters">
           ${p ? '' : '<button type="button" class="btn" id="autoCode">자동</button>'}</div>
           <div class="hint">태그에 붙인 코드를 입력하거나 [자동]을 누르세요. 바코드 스캐너도 됩니다.</div>
         </label>
@@ -787,7 +797,7 @@
     };
     if (auto) {
       auto.onclick = fillCode;
-      fillCode();
+      if (!presetCode) fillCode();
     }
 
     form.onsubmit = async (e) => {
@@ -824,7 +834,7 @@
               p_thumb_path: uploaded.thumb_path,
             });
             if (error) throw error;
-            toast(`${normCode(fields.p_code)} 등록 완료`);
+            toast(`${normCode(fields.p_code)} 등록 완료 · 상세 화면에서 [라벨 출력] 가능`);
             location.hash = `#/p/${newId}`;
           }
         } catch (err) {
@@ -1135,14 +1145,384 @@
     };
   }
 
+  // ---------------- 외부 라이브러리 (필요할 때만 불러옴) ----------------
+  const scriptCache = {};
+  function loadScript(src) {
+    if (!scriptCache[src]) {
+      scriptCache[src] = new Promise((resolve, reject) => {
+        const el = document.createElement('script');
+        el.src = src;
+        el.onload = resolve;
+        el.onerror = () => {
+          delete scriptCache[src];
+          reject(new Error('기능을 불러오지 못했습니다. 인터넷 연결을 확인하세요'));
+        };
+        document.head.appendChild(el);
+      });
+    }
+    return scriptCache[src];
+  }
+
+  // ---------------- 스캔 판매 ----------------
+  let scanner = null;
+  let lastScan = { code: '', at: 0 };
+
+  async function stopScanner() {
+    const sc = scanner;
+    scanner = null;
+    if (!sc) return;
+    try {
+      await sc.stop();
+    } catch {}
+    try {
+      sc.clear();
+    } catch {}
+  }
+
+  function resumeScanner() {
+    try {
+      if (scanner) scanner.resume();
+    } catch {}
+    const input = $('#scanInput');
+    if (input && !matchMedia('(pointer: coarse)').matches) input.focus();
+  }
+
+  function viewScan() {
+    state.view = 'scan';
+    shell(
+      'scan',
+      `<h1>스캔</h1>
+      <div class="scan-wrap">
+        <div>
+          <div id="reader" class="reader"></div>
+          <button class="btn primary block" id="camBtn">📷 카메라로 찍기</button>
+          <label class="field" style="margin-top:14px"><span>바코드 스캐너 / 직접 입력</span>
+            <input type="text" id="scanInput" placeholder="상품코드 입력 후 Enter" autocomplete="off" autocapitalize="characters" enterkeyhint="go"></label>
+          <p class="hint">QR코드와 바코드 모두 됩니다. 찍으면 상품이 뜨고, [판매 완료]를 눌러야 판매 처리됩니다.</p>
+        </div>
+        <div id="scanResult"></div>
+      </div>`
+    );
+    const input = $('#scanInput');
+    input.onkeydown = (e) => {
+      if (e.key === 'Enter' && input.value.trim()) {
+        const v = input.value;
+        input.value = '';
+        handleScan(v);
+      }
+    };
+    if (!matchMedia('(pointer: coarse)').matches) input.focus();
+    $('#camBtn').onclick = startCamera;
+    if (matchMedia('(pointer: coarse)').matches) startCamera(); // 휴대폰은 바로 카메라 켜기
+  }
+
+  async function startCamera() {
+    const btn = $('#camBtn');
+    if (!btn) return;
+    if (scanner) {
+      await stopScanner();
+      btn.textContent = '📷 카메라로 찍기';
+      return;
+    }
+    btn.disabled = true;
+    btn.textContent = '카메라 준비 중…';
+    try {
+      await loadScript('./vendor/html5-qrcode-2.3.8.min.js');
+      if (state.view !== 'scan') return;
+      const L = window.__Html5QrcodeLibrary__;
+      const F = L.Html5QrcodeSupportedFormats;
+      const sc = new L.Html5Qrcode('reader', {
+        verbose: false,
+        formatsToSupport: [F.QR_CODE, F.CODE_128, F.CODE_39, F.EAN_13, F.EAN_8, F.UPC_A],
+        experimentalFeatures: { useBarCodeDetectorIfSupported: true },
+      });
+      await sc.start(
+        { facingMode: 'environment' },
+        {
+          fps: 10,
+          qrbox: (w, h) => ({ width: Math.max(120, Math.floor(w * 0.85)), height: Math.max(80, Math.floor(Math.min(h, w) * 0.55)) }),
+        },
+        (text) => {
+          const now = Date.now();
+          if (text === lastScan.code && now - lastScan.at < 3000) return;
+          lastScan = { code: text, at: now };
+          try {
+            sc.pause(true);
+          } catch {}
+          handleScan(text);
+        },
+        () => {}
+      );
+      if (state.view !== 'scan') {
+        sc.stop().catch(() => {});
+        return;
+      }
+      scanner = sc;
+      btn.textContent = '카메라 끄기';
+    } catch (err) {
+      const m = String(err?.message || err);
+      toast(
+        /Permission|NotAllowed/i.test(m)
+          ? '카메라 권한이 거부되었습니다. 브라우저 설정에서 카메라를 허용하세요'
+          : /NotFound|no camera|Requested device not found/i.test(m)
+            ? '카메라를 찾을 수 없습니다. 바코드 스캐너나 직접 입력을 사용하세요'
+            : `카메라를 켤 수 없습니다: ${m}`,
+        'error'
+      );
+      btn.textContent = '📷 카메라로 찍기';
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function handleScan(raw) {
+    const el = $('#scanResult');
+    if (!el) return;
+    const code = normCode(raw);
+    navigator.vibrate?.(60);
+    el.innerHTML = `<div class="card empty">${esc(code)} 찾는 중…</div>`;
+    const { data: p, error } = await sb.from('products').select('*').eq('code', code).maybeSingle();
+    if (state.view !== 'scan') return;
+    if (error) {
+      el.innerHTML = `<div class="scan-card none"><strong>${esc(errText(error))}</strong></div>`;
+      return resumeScanner();
+    }
+    const again = `<button class="btn" data-again>다시 스캔</button>`;
+    if (!p) {
+      el.innerHTML = `<div class="scan-card none">
+        <strong>등록되지 않은 코드</strong><div class="bigcode">${esc(code)}</div>
+        <div class="actions"><a class="btn primary" href="#/new?code=${encodeURIComponent(code)}" style="text-align:center;text-decoration:none">이 코드로 상품 등록</a>${again}</div></div>`;
+    } else {
+      const sold = p.status === 'sold';
+      const manage = canManage(p.store_id);
+      const head = `<img src="${esc(photoUrl(p.photo_path))}" alt="">
+        <div class="bigcode">${esc(p.code)}</div>
+        <div>${esc(p.name)}</div>
+        <div class="scan-price">${won(p.price)}</div>
+        <div class="hint">${esc(storeName(p.store_id))}</div>`;
+      if (sold) {
+        el.innerHTML = `<div class="scan-card sold">${head}
+          <div class="soldbox">이미 판매된 상품입니다<br>${fmt(p.sold_at)} · ${esc(storeName(p.sold_store_id))} · ${esc(personName(p.sold_by))}</div>
+          <div class="actions"><a class="btn" href="#/p/${p.id}" style="text-align:center;text-decoration:none">상세 보기</a>${again}</div></div>`;
+      } else if (!manage) {
+        el.innerHTML = `<div class="scan-card warn">${head}
+          <div class="warnbox">${esc(storeName(p.store_id))} 상품입니다. 판매는 해당 매장에서 처리합니다.</div>
+          <div class="actions"><a class="btn" href="#/p/${p.id}" style="text-align:center;text-decoration:none">상세 보기</a>${again}</div></div>`;
+      } else {
+        el.innerHTML = `<div class="scan-card ok">${head}
+          <label class="field" style="margin-top:12px"><span>판매 가격 (원)</span>
+            <input type="text" inputmode="numeric" id="soldPrice" value="${p.price ?? ''}"></label>
+          <div class="actions"><button class="btn sell block" id="scanSell">판매 완료</button>${again}</div></div>`;
+        $('#scanSell').onclick = (e) =>
+          busy(e.target, async () => {
+            const price = $('#soldPrice').value.replace(/[^0-9]/g, '');
+            const { error: se } = await sb.rpc('sell_product', { p_id: p.id, p_sold_price: price === '' ? null : Number(price) });
+            if (se) return toast(errText(se), 'error');
+            el.innerHTML = `<div class="scan-card done"><strong>✅ ${esc(p.code)} 판매 완료</strong>
+              <div class="hint">모든 매장에 반영되었습니다. 다음 상품을 찍으세요.</div></div>`;
+            resumeScanner();
+          });
+      }
+    }
+    const a = $('[data-again]', el);
+    if (a)
+      a.onclick = () => {
+        el.innerHTML = '';
+        resumeScanner();
+      };
+  }
+
+  // ---------------- 라벨 출력 (QR + 바코드) ----------------
+  const LABEL_SIZES = {
+    '50x30': { name: '라벨프린터 50×30mm', w: 50, h: 30 },
+    '40x30': { name: '라벨프린터 40×30mm', w: 40, h: 30 },
+    '60x40': { name: '라벨프린터 60×40mm', w: 60, h: 40 },
+    a4: { name: 'A4 스티커 21칸 (63.5×38.1mm)', w: 63.5, h: 38.1, sheet: { cols: 3, rows: 7, top: 15.15, left: 7.2, pitchX: 66, pitchY: 38.1 } },
+  };
+  const pref = (k, v) => {
+    try {
+      if (v === undefined) return localStorage.getItem(k);
+      localStorage.setItem(k, v);
+    } catch {}
+    return null;
+  };
+
+  function labelHtml(p, size) {
+    const pad = 1.5;
+    const qrMm = Math.min(size.h * 0.58, size.w * 0.42);
+    const barH = size.h - qrMm - pad * 2 - 1.2;
+    const qr = window.qrcode(0, 'M');
+    qr.addData(p.code);
+    qr.make();
+    const qrSvg = qr.createSvgTag({ cellSize: 2, margin: 2, scalable: true });
+    const bar = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    window.JsBarcode(bar, p.code, { format: 'CODE128', displayValue: false, margin: 0, height: 50, width: 2 });
+    const bw = bar.getAttribute('width');
+    const bh = bar.getAttribute('height');
+    bar.setAttribute('viewBox', `0 0 ${parseFloat(bw)} ${parseFloat(bh)}`);
+    bar.setAttribute('preserveAspectRatio', 'none');
+    bar.removeAttribute('width');
+    bar.removeAttribute('height');
+    bar.removeAttribute('style');
+    const fs = Math.max(2.2, Math.min(3.2, size.h / 10));
+    return `<div class="label" style="width:${size.w}mm;height:${size.h}mm;padding:${pad}mm">
+      <div class="label-top" style="height:${qrMm}mm">
+        <div class="label-qr" style="width:${qrMm}mm;height:${qrMm}mm">${qrSvg}</div>
+        <div class="label-text" style="font-size:${fs}mm">
+          <div class="label-code">${esc(p.code)}</div>
+          <div class="label-name">${esc(p.name)}</div>
+          <div class="label-price">${p.price != null ? won(p.price) : ''}</div>
+        </div>
+      </div>
+      <div class="label-bar" style="height:${barH}mm;margin-top:1.2mm;padding:0 ${Math.max(0, 3 - pad)}mm">${bar.outerHTML}</div>
+    </div>`;
+  }
+
+  function sheetHtml(items, size) {
+    if (!size.sheet) return items.map((p) => `<div class="label-page">${labelHtml(p, size)}</div>`).join('');
+    const sh = size.sheet;
+    const per = sh.cols * sh.rows;
+    let out = '';
+    for (let i = 0; i < items.length; i += per) {
+      out += `<div class="a4-page">${items
+        .slice(i, i + per)
+        .map((p, j) => {
+          const c = j % sh.cols;
+          const r = Math.floor(j / sh.cols);
+          return `<div style="position:absolute;left:${sh.left + c * sh.pitchX}mm;top:${sh.top + r * sh.pitchY}mm">${labelHtml(p, size)}</div>`;
+        })
+        .join('')}</div>`;
+    }
+    return out;
+  }
+
+  function printLabels(items, sizeKey) {
+    const size = LABEL_SIZES[sizeKey];
+    document.getElementById('printArea')?.remove();
+    document.getElementById('printPage')?.remove();
+    const area = document.createElement('div');
+    area.id = 'printArea';
+    area.innerHTML = sheetHtml(items, size);
+    document.body.appendChild(area);
+    const st = document.createElement('style');
+    st.id = 'printPage';
+    st.textContent = size.sheet ? '@page { size: A4; margin: 0 }' : `@page { size: ${size.w}mm ${size.h}mm; margin: 0 }`;
+    document.head.appendChild(st);
+    const cleanup = () => {
+      area.remove();
+      st.remove();
+      window.removeEventListener('afterprint', cleanup);
+    };
+    window.addEventListener('afterprint', cleanup);
+    setTimeout(() => window.print(), 50);
+  }
+
+  async function viewLabels(ids) {
+    state.view = 'labels';
+    shell('list', `<div class="empty">불러오는 중…</div>`);
+    await Promise.all([loadScript('./vendor/qrcode-generator-1.4.4.js'), loadScript('./vendor/jsbarcode-3.11.6.min.js')]);
+    let qb = sb.from('products').select('*');
+    if (ids.length) qb = qb.in('id', ids);
+    else {
+      qb = qb.eq('status', 'available').order('created_at', { ascending: false }).limit(100);
+      if (!isAdmin() && state.me.store_id) qb = qb.eq('store_id', state.me.store_id);
+    }
+    const { data, error } = await qb;
+    if (state.view !== 'labels') return;
+    if (error) return toast(errText(error), 'error');
+    const products = data || [];
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const checked = new Set(ids.length ? products.map((p) => p.id) : products.filter((p) => new Date(p.created_at) >= today).map((p) => p.id));
+    let sizeKey = pref('labelSize') || '50x30';
+    if (!LABEL_SIZES[sizeKey]) sizeKey = '50x30';
+
+    shell(
+      'list',
+      `<p><a href="${ids.length === 1 ? `#/p/${ids[0]}` : '#/'}">← 돌아가기</a></p>
+      <h1>라벨 출력</h1>
+      <div class="card form" style="max-width:none">
+        <div class="row">
+          <label class="field"><span>라벨 종류</span><select id="lsize">${Object.entries(LABEL_SIZES)
+            .map(([k, v]) => `<option value="${k}" ${k === sizeKey ? 'selected' : ''}>${v.name}</option>`)
+            .join('')}</select></label>
+          <label class="field"><span>상품당 장수</span><input type="number" id="lcopies" min="1" max="20" value="1"></label>
+        </div>
+        <button class="btn primary block" id="lprint">🖨 인쇄</button>
+        <p class="hint">라벨 하나에 QR코드와 바코드가 함께 들어갑니다. 인쇄 창에서 <b>여백: 없음</b>, <b>배율: 100%(실제 크기)</b>로 설정하세요.</p>
+      </div>
+      ${
+        ids.length
+          ? ''
+          : `<h2>출력할 상품 <small class="hint">(판매중 · 최근 100개, 오늘 등록한 상품이 미리 선택됨)</small></h2>
+        <div class="row" style="margin-bottom:8px"><button class="btn small" id="lall">전체 선택</button><button class="btn small" id="lnone">선택 해제</button><span></span></div>
+        <div class="pick-list">${
+          products
+            .map(
+              (p) => `<label class="pick"><input type="checkbox" value="${p.id}" ${checked.has(p.id) ? 'checked' : ''}>
+              <img src="${esc(photoUrl(p.thumb_path || p.photo_path))}" alt=""><span><b>${esc(p.code)}</b><br><small>${esc(p.name)} · ${esc(
+                storeName(p.store_id)
+              )}</small></span></label>`
+            )
+            .join('') || '<div class="empty">판매중인 상품이 없습니다</div>'
+        }</div>`
+      }
+      <h2>미리보기</h2>
+      <div id="lpreview" class="label-preview"></div>`
+    );
+
+    const selected = () => products.filter((p) => checked.has(p.id));
+    const renderPreview = () => {
+      const size = LABEL_SIZES[sizeKey];
+      const list = selected().slice(0, 6);
+      $('#lpreview').innerHTML = list.length
+        ? list.map((p) => labelHtml(p, size)).join('') + (selected().length > 6 ? `<div class="hint">외 ${selected().length - 6}개</div>` : '')
+        : '<div class="hint">선택된 상품이 없습니다</div>';
+    };
+    renderPreview();
+    $('#lsize').onchange = (e) => {
+      sizeKey = e.target.value;
+      pref('labelSize', sizeKey);
+      renderPreview();
+    };
+    root.querySelectorAll('.pick input').forEach(
+      (cb) =>
+        (cb.onchange = () => {
+          const id = Number(cb.value);
+          cb.checked ? checked.add(id) : checked.delete(id);
+          renderPreview();
+        })
+    );
+    const setAll = (on) => {
+      root.querySelectorAll('.pick input').forEach((cb) => {
+        cb.checked = on;
+        on ? checked.add(Number(cb.value)) : checked.delete(Number(cb.value));
+      });
+      renderPreview();
+    };
+    if ($('#lall')) $('#lall').onclick = () => setAll(true);
+    if ($('#lnone')) $('#lnone').onclick = () => setAll(false);
+    $('#lprint').onclick = () => {
+      const copies = Math.min(20, Math.max(1, Number($('#lcopies').value) || 1));
+      const items = selected().flatMap((p) => Array(copies).fill(p));
+      if (!items.length) return toast('출력할 상품을 선택하세요', 'error');
+      printLabels(items, sizeKey);
+    };
+  }
+
   // ---------------- 라우터 ----------------
   function route() {
     if (!state.me) return renderLogin();
     if (licenseBlocked()) return renderExpired();
-    const h = location.hash.replace(/^#\/?/, '');
+    const full = location.hash.replace(/^#\/?/, '');
+    const [h, qs = ''] = full.split('?');
+    const params = new URLSearchParams(qs);
     let m;
     state.detailId = null;
-    if (h === 'new') return viewForm(null);
+    if (h !== 'scan') stopScanner();
+    if (h === 'new') return viewForm(null, normCode(params.get('code') || ''));
+    if (h === 'scan') return viewScan();
+    if (h === 'labels') return viewLabels((params.get('ids') || '').split(',').map(Number).filter(Boolean));
     if ((m = /^p\/(\d+)\/edit$/.exec(h))) return viewForm(Number(m[1]));
     if ((m = /^p\/(\d+)$/.exec(h))) return viewDetail(Number(m[1]));
     if (h === 'admin') return viewAdmin();
