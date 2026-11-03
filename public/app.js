@@ -236,7 +236,7 @@
           renderChips();
           await loadList(true, Math.max(state.list.length, PAGE));
         } else if (state.view === 'sell') {
-          await loadToday();
+          await Promise.all([loadToday(), loadCash()]);
         } else if (state.view === 'settle') {
           await loadSettle();
         } else if (state.view === 'detail' && state.detailId) {
@@ -274,9 +274,18 @@
           location.hash = '#/';
           return;
         }
+        const n = payload.new;
+        if (n && n.status === 'sold' && cart.items.some((c) => c.id === n.id) && !cart.paying) {
+          const c = cart.items.find((x) => x.id === n.id);
+          c.soldElsewhere = true;
+          saveCart();
+          if (state.view === 'sell') renderCart();
+        }
         scheduleRefresh();
       })
       .on('postgres_changes', { event: 'INSERT', schema: 'public', table: 'product_events' }, onEvent)
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'sales' }, () => scheduleRefresh())
+      .on('postgres_changes', { event: '*', schema: 'public', table: 'cash_sessions' }, () => scheduleRefresh())
       .subscribe((status) => {
         const was = state.live;
         state.live = status === 'SUBSCRIBED';
@@ -688,6 +697,7 @@
             }
             <div class="actions">
               ${manage && !sold ? `<button class="btn sell block" id="sellBtn">판매 처리</button>` : ''}
+              ${sold && p.sale_id ? `<button class="btn block" id="receiptBtn">🧾 영수증 보기 / 출력</button>` : ''}
               ${manage && sold ? `<button class="btn block" id="unsellBtn">판매 취소 (되돌리기)</button>` : ''}
               <a class="btn" href="#/labels?ids=${p.id}" style="text-align:center;text-decoration:none">🏷 라벨 출력 / 저장 (QR · 바코드)</a>
               ${manage ? `<button class="btn" id="editBtn">수정 / 매장 이동</button>` : ''}
@@ -717,6 +727,8 @@
           viewDetail(p.id, true);
         });
       };
+    const receiptBtn = $('#receiptBtn');
+    if (receiptBtn) receiptBtn.onclick = () => openReceipt(p.sale_id, () => viewDetail(p.id, true));
     const unsellBtn = $('#unsellBtn');
     if (unsellBtn)
       unsellBtn.onclick = async () => {
@@ -926,7 +938,7 @@
         ${state.stores
           .map(
             (s) => `<div class="row" style="margin-bottom:8px"><span>${esc(s.name)} <small class="hint">재고 ${s.available}</small></span>
-            <button class="btn small" data-rename="${s.id}">이름 변경</button></div>`
+            <button class="btn small" data-rename="${s.id}">매장 정보 / 영수증 설정</button></div>`
           )
           .join('')}
         <button class="btn" id="addStore" style="margin-top:6px">+ 매장 추가</button>
@@ -959,14 +971,7 @@
     root.querySelectorAll('[data-edit]').forEach((b) => (b.onclick = () => editUser(state.people[b.dataset.edit], storeOpts)));
     root.querySelectorAll('[data-rename]').forEach(
       (b) =>
-        (b.onclick = async () => {
-          const s = state.storeMap[b.dataset.rename];
-          const name = await promptBox('매장 이름 변경', '매장 이름', s.name);
-          if (!name || !name.trim()) return;
-          const { error } = await sb.from('stores').update({ name: name.trim() }).eq('id', s.id);
-          if (error) return toast(errText(error), 'error');
-          viewAdmin();
-        })
+        (b.onclick = () => editStore(Number(b.dataset.rename)))
     );
     $('#addStore').onclick = async () => {
       const name = await promptBox('매장 추가', '매장 이름', `${state.stores.length + 1}호점`);
@@ -975,6 +980,42 @@
       if (error) return toast(/duplicate/i.test(error.message) ? '이미 있는 매장 이름입니다' : errText(error), 'error');
       viewAdmin();
     };
+  }
+
+  async function editStore(id) {
+    const { data: st, error } = await sb.from('stores').select('*').eq('id', id).maybeSingle();
+    if (error || !st) return toast(errText(error || '매장을 찾을 수 없습니다'), 'error');
+    const f = (name, label, ph = '') =>
+      `<label class="field"><span>${label}</span><input type="text" name="${name}" value="${esc(st[name] ?? '')}" placeholder="${esc(ph)}"></label>`;
+    modal(
+      `<h3>${esc(st.name)} 정보</h3>
+      ${f('name', '매장 이름 *')}
+      <p class="hint" style="margin:-6px 0 10px">아래는 영수증에 찍히는 정보입니다.</p>
+      ${f('biz_name', '상호', st.name)}
+      <div class="row">${f('biz_no', '사업자등록번호', '000-00-00000')}${f('owner_name', '대표자')}</div>
+      ${f('address', '주소')}
+      ${f('phone', '전화번호')}
+      <label class="field"><span>영수증 하단 문구</span><textarea name="receipt_footer">${esc(st.receipt_footer)}</textarea></label>
+      <details style="margin-bottom:12px"><summary class="hint">외부 연동 (준비)</summary>
+        ${f('toss_merchant_id', '토스플레이스 가맹점 ID', '토스 연동 시 입력')}</details>
+      <div class="err" data-err></div>
+      <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>저장</button></div>`,
+      (bg, close) => {
+        $('[data-x]', bg).onclick = () => close();
+        $('[data-ok]', bg).onclick = (e) =>
+          busy(e.target, async () => {
+            const v = (n) => $(`[name=${n}]`, bg).value.trim();
+            if (!v('name')) return ($('[data-err]', bg).textContent = '매장 이름을 입력하세요');
+            const upd = {};
+            ['name', 'biz_name', 'biz_no', 'owner_name', 'address', 'phone', 'receipt_footer', 'toss_merchant_id'].forEach((n) => (upd[n] = v(n)));
+            const { error: e2 } = await sb.from('stores').update(upd).eq('id', id);
+            if (e2) return ($('[data-err]', bg).textContent = /duplicate/i.test(e2.message) ? '이미 있는 매장 이름입니다' : errText(e2));
+            close();
+            toast('저장했습니다');
+            viewAdmin();
+          });
+      }
+    );
   }
 
   function editUser(u, storeOpts) {
@@ -1179,12 +1220,37 @@
     return scriptCache[src];
   }
 
-  // ---------------- 상품 판매 (계산대 화면) ----------------
+  // ---------------- 상품 판매 (계산대 화면 · 장바구니) ----------------
   let scanner = null;
   let lastScan = { code: '', at: 0 };
   const isTouch = () => matchMedia('(pointer: coarse)').matches;
+  const numVal = (v) => {
+    const d = String(v ?? '').replace(/[^0-9]/g, '');
+    return d === '' ? null : Number(d);
+  };
 
-  // 결제수단 + 가격 선택 창 (상품 상세 화면에서 판매할 때)
+  // 장바구니 (새로고침해도 유지)
+  const cart = { items: [], discount: 0, paying: false };
+  const cartKey = () => `cart:${state.me?.id}`;
+  function saveCart() {
+    try {
+      localStorage.setItem(cartKey(), JSON.stringify({ items: cart.items, discount: cart.discount }));
+    } catch {}
+  }
+  function loadCart() {
+    try {
+      const v = JSON.parse(localStorage.getItem(cartKey()) || 'null');
+      cart.items = Array.isArray(v?.items) ? v.items : [];
+      cart.discount = Number(v?.discount) || 0;
+    } catch {
+      cart.items = [];
+      cart.discount = 0;
+    }
+  }
+  const cartSubtotal = () => cart.items.reduce((a, c) => a + (Number(c.sell) || 0), 0);
+  const cartTotal = () => Math.max(0, cartSubtotal() - (Number(cart.discount) || 0));
+
+  // 결제수단 + 가격 선택 창 (상품 상세 화면에서 1개 판매할 때)
   function sellDialog(p) {
     return modal(
       `<h3>${esc(p.code)} 판매</h3>
@@ -1198,11 +1264,7 @@
         const input = $('input', bg);
         $('[data-x]', bg).onclick = () => close(null);
         bg.querySelectorAll('[data-pay]').forEach(
-          (b) =>
-            (b.onclick = () => {
-              const v = input.value.replace(/[^0-9]/g, '');
-              close({ price: v === '' ? null : Number(v), payment: b.dataset.pay });
-            })
+          (b) => (b.onclick = () => close({ price: numVal(input.value), payment: b.dataset.pay }))
         );
       }
     );
@@ -1222,28 +1284,35 @@
 
   function focusScanInput() {
     const input = $('#scanInput');
+    const active = document.activeElement;
+    // 가격/할인 입력 중이면 커서를 뺏지 않음
+    if (active && active !== input && active.matches?.('input, textarea, select')) return;
     if (input && !isTouch() && !document.querySelector('.modal-bg')) input.focus();
   }
 
-  function resumeScanner() {
-    try {
-      if (scanner) scanner.resume();
-    } catch {}
+  function resumeScanner(delay = 0) {
+    setTimeout(() => {
+      try {
+        if (scanner) scanner.resume();
+      } catch {}
+    }, delay);
     focusScanInput();
   }
 
   function viewSell() {
     state.view = 'sell';
+    loadCart();
     const me = state.me;
     shell(
       'sell',
       `<div class="pos">
         <div class="pos-main">
-          <h1>상품 판매</h1>
+          <div class="pos-head"><h1>상품 판매</h1><div id="cashBox"></div></div>
           <input type="text" id="scanInput" class="pos-input" placeholder="바코드/QR을 찍거나 상품코드 입력 후 Enter" autocomplete="off" autocapitalize="characters" enterkeyhint="go">
           <div id="reader" class="reader"></div>
           <button class="btn block" id="camBtn">📷 카메라로 찍기</button>
-          <div id="scanResult" style="margin-top:14px"></div>
+          <div id="scanMsg"></div>
+          <div id="cart"></div>
         </div>
         <div class="pos-side">
           <h2>오늘 판매 <small class="hint">${me.store_id ? esc(storeName(me.store_id)) : '전체 매장'}</small></h2>
@@ -1261,14 +1330,16 @@
         handleScan(v);
       }
     };
-    // PC 계산대: 화면 어디를 눌러도 입력칸에 커서 유지 → 스캐너로 바로 찍기
+    // PC 계산대: 빈 곳을 눌러도 입력칸에 커서 유지 → 스캐너로 바로 찍기
     $('.pos').addEventListener('click', (e) => {
-      if (!e.target.closest('input, button, a, select, textarea, label')) focusScanInput();
+      if (!e.target.closest('input, button, a, select, textarea, label, .sale-row')) focusScanInput();
     });
-    focusScanInput();
     $('#camBtn').onclick = startCamera;
+    renderCart();
+    focusScanInput();
     if (isTouch()) startCamera(); // 휴대폰은 바로 카메라
     loadToday();
+    loadCash();
   }
 
   async function startCamera() {
@@ -1330,131 +1401,415 @@
     }
   }
 
+  function scanMsg(kind, html) {
+    const el = $('#scanMsg');
+    if (el) el.innerHTML = html ? `<div class="scan-msg ${kind}">${html}</div>` : '';
+  }
+
+  // 찍은 상품 → 장바구니에 담기
   async function handleScan(raw) {
-    const el = $('#scanResult');
-    if (!el) return;
     const code = normCode(raw);
-    navigator.vibrate?.(60);
-    el.innerHTML = `<div class="card empty">${esc(code)} 찾는 중…</div>`;
+    if (!code) return;
+    navigator.vibrate?.(50);
+    if (cart.items.some((c) => c.code === code)) {
+      scanMsg('warn', `<b>${esc(code)}</b> 이미 장바구니에 있습니다`);
+      return resumeScanner(1200);
+    }
+    scanMsg('info', `${esc(code)} 찾는 중…`);
     const { data: p, error } = await sb.from('products').select('*').eq('code', code).maybeSingle();
     if (state.view !== 'sell') return;
     if (error) {
-      el.innerHTML = `<div class="scan-card none"><strong>${esc(errText(error))}</strong></div>`;
-      return resumeScanner();
+      scanMsg('error', esc(errText(error)));
+      return resumeScanner(1500);
     }
-    const again = `<button class="btn" data-again>취소 / 다음 상품</button>`;
     if (!p) {
-      el.innerHTML = `<div class="scan-card none">
-        <strong>등록되지 않은 코드</strong><div class="bigcode">${esc(code)}</div>
-        <div class="actions">${
-          isCashier()
-            ? '<p class="hint">실장에게 상품 등록을 요청하세요</p>'
-            : `<a class="btn primary" href="#/new?code=${encodeURIComponent(code)}" style="text-align:center;text-decoration:none">이 코드로 상품 등록</a>`
-        }${again}</div></div>`;
+      scanMsg(
+        'none',
+        `<b>${esc(code)}</b> 등록되지 않은 코드입니다 ${
+          isCashier() ? '· 실장에게 등록을 요청하세요' : `· <a href="#/new?code=${encodeURIComponent(code)}">이 코드로 상품 등록</a>`
+        }`
+      );
+    } else if (p.status === 'sold') {
+      scanMsg('error', `<b>${esc(p.code)}</b> 이미 판매된 상품 · ${fmt(p.sold_at)} ${esc(storeName(p.sold_store_id))} ${esc(personName(p.sold_by))}`);
+    } else if (!canManage(p.store_id)) {
+      scanMsg('warn', `<b>${esc(p.code)}</b> ${esc(storeName(p.store_id))} 상품입니다 · 판매는 해당 매장에서 처리합니다`);
+    } else if (cart.items.length && cart.items[0].store_id !== p.store_id) {
+      scanMsg('warn', `<b>${esc(p.code)}</b> 다른 매장(${esc(storeName(p.store_id))}) 상품은 한 영수증에 담을 수 없습니다`);
     } else {
-      const sold = p.status === 'sold';
-      const manage = canManage(p.store_id);
-      const head = `<div class="scan-head"><img src="${esc(photoUrl(p.thumb_path || p.photo_path))}" alt="">
-        <div><div class="bigcode">${esc(p.code)}</div><div>${esc(p.name)}</div>
-        <div class="scan-price">${won(p.price)}</div><div class="hint">${esc(storeName(p.store_id))}</div></div></div>`;
-      if (sold) {
-        el.innerHTML = `<div class="scan-card sold">${head}
-          <div class="soldbox">이미 판매된 상품입니다<br>${fmt(p.sold_at)} · ${esc(storeName(p.sold_store_id))} · ${esc(personName(p.sold_by))}</div>
-          <div class="actions">${again}</div></div>`;
-      } else if (!manage) {
-        el.innerHTML = `<div class="scan-card warn">${head}
-          <div class="warnbox">${esc(storeName(p.store_id))} 상품입니다. 판매는 해당 매장에서 처리합니다.</div>
-          <div class="actions">${again}</div></div>`;
-      } else {
-        el.innerHTML = `<div class="scan-card ok">${head}
-          <label class="field" style="margin-top:12px"><span>판매 가격 (원) · 할인 시 수정</span>
-            <input type="text" inputmode="numeric" id="soldPrice" value="${p.price ?? ''}"></label>
-          <div class="paybtns big">${Object.entries(PAY_LABEL)
-            .map(([k, v]) => `<button class="btn sell" data-pay="${k}">${v}</button>`)
-            .join('')}</div>
-          <div class="actions">${again}</div></div>`;
-        el.querySelectorAll('[data-pay]').forEach(
-          (b) =>
-            (b.onclick = () =>
-              busy(b, async () => {
-                el.querySelectorAll('[data-pay]').forEach((x) => (x.disabled = true));
-                const price = $('#soldPrice').value.replace(/[^0-9]/g, '');
-                const amount = price === '' ? null : Number(price);
-                const { error: se } = await sb.rpc('sell_product', { p_id: p.id, p_sold_price: amount, p_payment: b.dataset.pay });
-                if (se) {
-                  el.querySelectorAll('[data-pay]').forEach((x) => (x.disabled = false));
-                  return toast(errText(se), 'error');
-                }
-                el.innerHTML = `<div class="scan-card done"><strong>✅ ${esc(p.code)} 판매 완료</strong>
-                  <div>${won(amount)} · ${PAY_LABEL[b.dataset.pay]}</div>
-                  <div class="hint">모든 매장에 반영되었습니다. 다음 상품을 찍으세요.</div></div>`;
-                loadToday();
-                resumeScanner();
-              }))
-        );
-      }
+      cart.items.push({
+        id: p.id,
+        code: p.code,
+        name: p.name,
+        price: p.price,
+        sell: p.price ?? 0,
+        thumb: p.thumb_path || p.photo_path,
+        store_id: p.store_id,
+      });
+      saveCart();
+      renderCart();
+      scanMsg('ok', `✓ <b>${esc(p.code)}</b> ${esc(p.name)} ${won(p.price)} 담김`);
     }
-    const a = $('[data-again]', el);
-    if (a)
-      a.onclick = () => {
-        el.innerHTML = '';
-        resumeScanner();
-      };
-    if (!p || p.status === 'sold' || !canManage(p.store_id)) resumeScanner();
-    else focusScanInput();
+    resumeScanner(1200);
   }
 
-  // 판매 내역 조회 (오늘 판매 / 정산 공용)
+  function renderCart() {
+    const el = $('#cart');
+    if (!el) return;
+    if (!cart.items.length) {
+      el.innerHTML = `<div class="cart cart-empty">상품을 찍으면 여기에 담깁니다.<br><span class="hint">여러 개를 담아서 한 번에 결제할 수 있습니다.</span></div>${receiptOptionsHtml()}`;
+      bindReceiptOptions();
+      return;
+    }
+    const blocked = cart.items.some((c) => c.soldElsewhere);
+    el.innerHTML = `<div class="cart">
+      ${cart.items
+        .map(
+          (c, i) => `<div class="cart-row ${c.soldElsewhere ? 'gone' : ''}">
+          <img src="${esc(photoUrl(c.thumb))}" alt="">
+          <div class="cn"><b>${esc(c.code)}</b><br><small>${esc(c.name)}</small>
+            ${c.soldElsewhere ? '<br><small class="gone-msg">다른 곳에서 판매됨 · 빼주세요</small>' : ''}</div>
+          <div class="cp"><input type="text" inputmode="numeric" data-price="${i}" value="${c.sell ?? ''}">
+            ${Number(c.sell) !== Number(c.price) && c.price != null ? `<small class="hint"><s>${won(c.price)}</s></small>` : ''}</div>
+          <button class="btn small" data-del="${i}" title="빼기">✕</button>
+        </div>`
+        )
+        .join('')}
+      <div class="cart-sum">
+        <div><span>상품 ${cart.items.length}개 합계</span><b id="cSub">${won(cartSubtotal())}</b></div>
+        <div><span>추가 할인 (원)</span><input type="text" inputmode="numeric" id="cDisc" value="${cart.discount || ''}" placeholder="0"></div>
+        <div class="cart-total"><span>결제 금액</span><b id="cTotal">${won(cartTotal())}</b></div>
+      </div>
+      <div class="paybtns big">${Object.entries(PAY_LABEL)
+        .map(([k, v]) => `<button class="btn sell" data-pay="${k}" ${blocked ? 'disabled' : ''}>${v}</button>`)
+        .join('')}</div>
+      <div class="row" style="margin-top:8px"><button class="btn small" id="cClear">장바구니 비우기</button><span></span></div>
+    </div>${receiptOptionsHtml()}`;
+    const updateSums = () => {
+      $('#cSub').textContent = won(cartSubtotal());
+      $('#cTotal').textContent = won(cartTotal());
+      saveCart();
+    };
+    el.querySelectorAll('[data-price]').forEach(
+      (inp) =>
+        (inp.oninput = () => {
+          cart.items[Number(inp.dataset.price)].sell = numVal(inp.value) ?? 0;
+          updateSums();
+        })
+    );
+    el.querySelectorAll('[data-del]').forEach(
+      (b) =>
+        (b.onclick = () => {
+          cart.items.splice(Number(b.dataset.del), 1);
+          if (!cart.items.length) cart.discount = 0;
+          saveCart();
+          renderCart();
+          focusScanInput();
+        })
+    );
+    $('#cDisc').oninput = (e) => {
+      cart.discount = numVal(e.target.value) ?? 0;
+      updateSums();
+    };
+    $('#cClear').onclick = async () => {
+      if (!(await confirmBox('장바구니 비우기', '담은 상품을 모두 뺄까요?', '비우기'))) return;
+      cart.items = [];
+      cart.discount = 0;
+      saveCart();
+      renderCart();
+      scanMsg('', '');
+      focusScanInput();
+    };
+    el.querySelectorAll('[data-pay]').forEach((b) => (b.onclick = () => pay(b.dataset.pay)));
+    bindReceiptOptions();
+  }
+
+  // 영수증 옵션 (자동 출력, 용지 폭)
+  const receiptPref = () => ({ auto: pref('receiptAuto') === '1', width: pref('receiptWidth') === '58' ? 58 : 80 });
+  function receiptOptionsHtml() {
+    const r = receiptPref();
+    return `<div class="receipt-opts">
+      <label><input type="checkbox" id="rAuto" ${r.auto ? 'checked' : ''}> 결제 후 영수증 자동 출력</label>
+      <label>용지 <select id="rWidth"><option value="80" ${r.width === 80 ? 'selected' : ''}>80mm</option><option value="58" ${
+        r.width === 58 ? 'selected' : ''
+      }>58mm</option></select></label>
+    </div>`;
+  }
+  function bindReceiptOptions() {
+    const a = $('#rAuto');
+    const w = $('#rWidth');
+    if (a) a.onchange = () => pref('receiptAuto', a.checked ? '1' : '0');
+    if (w) w.onchange = () => pref('receiptWidth', w.value);
+  }
+
+  // 현금 결제: 받은 금액 → 거스름돈
+  function cashDialog(total) {
+    return modal(
+      `<h3>현금 결제</h3>
+      <div class="cash-total"><span>결제 금액</span><b>${won(total)}</b></div>
+      <label class="field"><span>받은 금액 (원)</span><input type="text" inputmode="numeric" id="recv" value="${total}"></label>
+      <div class="quick-cash">
+        <button class="btn small" data-set="${total}">딱 맞게</button>
+        ${[10000, 50000, 100000].map((v) => `<button class="btn small" data-set="${v}">${v / 10000}만원</button>`).join('')}
+        ${[1000, 5000, 10000].map((v) => `<button class="btn small" data-add="${v}">+${v.toLocaleString('ko-KR')}</button>`).join('')}
+      </div>
+      <div class="cash-total change"><span>거스름돈</span><b id="chg">0원</b></div>
+      <div class="err" data-err></div>
+      <div class="row"><button class="btn" data-x>취소</button><button class="btn sell" data-ok>결제 완료</button></div>`,
+      (bg, close) => {
+        const input = $('#recv', bg);
+        const upd = () => {
+          const r = numVal(input.value) ?? 0;
+          $('#chg', bg).textContent = r >= total ? won(r - total) : `${won(total - r)} 부족`;
+          $('#chg', bg).classList.toggle('short', r < total);
+        };
+        input.oninput = upd;
+        input.focus();
+        input.select();
+        upd();
+        bg.querySelectorAll('[data-set]').forEach(
+          (b) =>
+            (b.onclick = () => {
+              input.value = b.dataset.set;
+              upd();
+            })
+        );
+        bg.querySelectorAll('[data-add]').forEach(
+          (b) =>
+            (b.onclick = () => {
+              input.value = (numVal(input.value) ?? 0) + Number(b.dataset.add);
+              upd();
+            })
+        );
+        const ok = () => {
+          const r = numVal(input.value) ?? 0;
+          if (r < total) return ($('[data-err]', bg).textContent = '받은 금액이 결제 금액보다 적습니다');
+          close(r);
+        };
+        $('[data-ok]', bg).onclick = ok;
+        input.onkeydown = (e) => {
+          if (e.key === 'Enter') ok();
+        };
+        $('[data-x]', bg).onclick = () => close(null);
+      }
+    );
+  }
+
+  async function pay(method) {
+    if (!cart.items.length || cart.paying) return;
+    const total = cartTotal();
+    if ((Number(cart.discount) || 0) > cartSubtotal()) return toast('할인이 상품 합계보다 큽니다', 'error');
+    let received = null;
+    if (method === 'cash') {
+      received = await cashDialog(total);
+      if (received === null) return focusScanInput();
+    }
+    cart.paying = true;
+    const btns = [...document.querySelectorAll('#cart [data-pay]')];
+    btns.forEach((b) => (b.disabled = true));
+    const { data, error } = await sb.rpc('checkout', {
+      p_items: cart.items.map((c) => ({ id: c.id, price: Number(c.sell) || 0 })),
+      p_discount: Number(cart.discount) || 0,
+      p_payment: method,
+      p_received_cash: received,
+      p_memo: '',
+    });
+    cart.paying = false;
+    if (error) {
+      btns.forEach((b) => (b.disabled = false));
+      toast(errText(error), 'error');
+      return focusScanInput();
+    }
+    cart.items = [];
+    cart.discount = 0;
+    saveCart();
+    renderCart();
+    scanMsg(
+      'done',
+      `✅ 결제 완료 · <b>${won(data.total)}</b> ${PAY_LABEL[method]}${
+        method === 'cash' && data.change ? ` · 거스름돈 <b>${won(data.change)}</b>` : ''
+      }<br><small>영수증 ${esc(data.receipt_no)}</small>
+      <div class="row" style="margin-top:8px"><button class="btn small" id="rPrint">🧾 영수증 출력</button><span></span></div>`
+    );
+    $('#rPrint').onclick = () => printReceipt(data.sale_id);
+    if (receiptPref().auto) printReceipt(data.sale_id);
+    loadToday();
+    loadCash();
+    focusScanInput();
+  }
+
+  // ---------------- 영수증 ----------------
+  async function fetchReceipt(saleId) {
+    const { data: sale, error } = await sb.from('sales').select('*, sale_items(*)').eq('id', saleId).maybeSingle();
+    if (error || !sale) throw error || new Error('영수증을 찾을 수 없습니다');
+    const { data: st } = await sb.from('stores').select('*').eq('id', sale.store_id).maybeSingle();
+    if (!state.people[sale.created_by]) await loadPeople();
+    return { sale, items: (sale.sale_items || []).sort((a, b) => a.id - b.id), store: st || { name: storeName(sale.store_id) } };
+  }
+
+  function receiptHtml({ sale, items, store }, widthMm) {
+    const line = (l, r, cls = '') => `<div class="r-line ${cls}"><span>${l}</span><span>${r}</span></div>`;
+    const t = new Date(sale.created_at).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false });
+    return `<div class="receipt" style="width:${widthMm - 8}mm">
+      <div class="r-title">${esc(store.biz_name || store.name)}</div>
+      <div class="r-info">
+        ${store.biz_no ? `사업자 ${esc(store.biz_no)}` : ''}${store.owner_name ? ` · 대표 ${esc(store.owner_name)}` : ''}
+        ${store.address ? `<br>${esc(store.address)}` : ''}${store.phone ? `<br>TEL ${esc(store.phone)}` : ''}
+      </div>
+      <div class="r-hr"></div>
+      ${line('영수증', esc(sale.receipt_no))}
+      ${line('일시', esc(t))}
+      ${line('판매자', esc(personName(sale.created_by)))}
+      ${sale.status === 'cancelled' ? '<div class="r-cancel">*** 취소된 영수증 ***</div>' : ''}
+      <div class="r-hr"></div>
+      ${items
+        .map(
+          (i) => `<div class="r-item ${i.status === 'refunded' ? 'refunded' : ''}"><div>${esc(i.name || i.code)}</div>
+          ${line(`<small>${esc(i.code)}</small>`, `${i.list_price != null && i.list_price !== i.price ? `<small><s>${won(i.list_price)}</s></small> ` : ''}${won(i.price)}${
+            i.status === 'refunded' ? ' (환불)' : ''
+          }`)}</div>`
+        )
+        .join('')}
+      <div class="r-hr"></div>
+      ${line(`상품 ${sale.item_count}개 합계`, won(sale.subtotal))}
+      ${sale.discount ? line('할인', `-${won(sale.discount)}`) : ''}
+      ${line('결제 금액', won(sale.total), 'r-total')}
+      ${sale.refunded_amount ? line('환불', `-${won(sale.refunded_amount)}`) : ''}
+      ${line('결제수단', PAY_LABEL[sale.payment] || '-')}
+      ${sale.payment === 'cash' && sale.received_cash != null ? line('받은 금액', won(sale.received_cash)) + line('거스름돈', won(sale.change_cash || 0)) : ''}
+      <div class="r-hr"></div>
+      <div class="r-foot">${esc(store.receipt_footer || '')}</div>
+    </div>`;
+  }
+
+  async function printReceipt(saleId) {
+    let r;
+    try {
+      r = await fetchReceipt(saleId);
+    } catch (e) {
+      return toast(errText(e), 'error');
+    }
+    const w = receiptPref().width;
+    document.getElementById('printArea')?.remove();
+    document.getElementById('printPage')?.remove();
+    const area = document.createElement('div');
+    area.id = 'printArea';
+    area.innerHTML = receiptHtml(r, w);
+    document.body.appendChild(area);
+    const st = document.createElement('style');
+    st.id = 'printPage';
+    st.textContent = `@page { size: ${w}mm 300mm; margin: 0 } #printArea .receipt { margin: 0 auto; }`;
+    document.head.appendChild(st);
+    const cleanup = () => {
+      area.remove();
+      st.remove();
+      window.removeEventListener('afterprint', cleanup);
+    };
+    window.addEventListener('afterprint', cleanup);
+    setTimeout(() => window.print(), 50);
+  }
+
+  const canCancelSale = (sale) =>
+    sale.status === 'completed' &&
+    (isCashier() ? sale.created_by === state.me.id && new Date(sale.created_at) >= new Date(kstStart(kstToday())) : canManage(sale.store_id));
+
+  async function openReceipt(saleId, after) {
+    let r;
+    try {
+      r = await fetchReceipt(saleId);
+    } catch (e) {
+      return toast(errText(e), 'error');
+    }
+    modal(
+      `<div class="receipt-preview">${receiptHtml(r, 80)}</div>
+      <div class="row" style="margin-top:12px">
+        <button class="btn" data-x>닫기</button>
+        ${canCancelSale(r.sale) ? '<button class="btn danger" data-cancel>영수증 취소</button>' : ''}
+        <button class="btn primary" data-print>🧾 출력</button>
+      </div>`,
+      (bg, close) => {
+        $('[data-x]', bg).onclick = () => close();
+        $('[data-print]', bg).onclick = () => printReceipt(saleId);
+        const c = $('[data-cancel]', bg);
+        if (c)
+          c.onclick = async () => {
+            close();
+            if (await cancelReceipt(r.sale)) after?.();
+          };
+      }
+    );
+  }
+
+  async function cancelReceipt(sale) {
+    const reason = await promptBox(
+      `영수증 ${sale.receipt_no} 취소`,
+      `사유 (상품 ${sale.item_count}개가 모두 판매중으로 돌아갑니다)`,
+      '',
+      '영수증 취소',
+      'sell'
+    );
+    if (reason === null) return false;
+    const { error } = await sb.rpc('cancel_sale', { p_sale_id: sale.id, p_reason: reason });
+    if (error) {
+      toast(errText(error), 'error');
+      return false;
+    }
+    toast(`영수증 ${sale.receipt_no} 를 취소했습니다`);
+    return true;
+  }
+
+  // ---------------- 판매 내역 (오늘 판매 / 정산 공용) ----------------
   async function fetchSales(from, to, storeId) {
     let qb = sb
-      .from('products')
-      .select('*')
-      .eq('status', 'sold')
-      .gte('sold_at', kstStart(from))
-      .lt('sold_at', kstStart(shiftDate(to, 1)))
-      .order('sold_at', { ascending: false })
-      .limit(3000);
-    if (storeId) qb = qb.eq('sold_store_id', Number(storeId));
+      .from('sales')
+      .select('*, sale_items(id, code, name, price, status)')
+      .gte('created_at', kstStart(from))
+      .lt('created_at', kstStart(shiftDate(to, 1)))
+      .order('created_at', { ascending: false })
+      .limit(2000);
+    if (storeId) qb = qb.eq('store_id', Number(storeId));
     const { data, error } = await qb;
     if (error) throw error;
     return data || [];
   }
 
+  // 완료된 영수증 기준 (취소 제외, 부분환불 차감)
   function salesTotals(rows) {
-    const t = { count: rows.length, total: 0, cash: 0, card: 0, transfer: 0, none: 0 };
+    const t = { receipts: 0, items: 0, total: 0, discount: 0, cash: 0, card: 0, transfer: 0, none: 0, refunded: 0, cancelled: 0 };
     for (const r of rows) {
-      const v = Number(r.sold_price) || 0;
-      t.total += v;
-      t[r.sold_payment || 'none'] += v;
+      if (r.status !== 'completed') {
+        t.cancelled++;
+        continue;
+      }
+      const net = (r.total || 0) - (r.refunded_amount || 0);
+      t.receipts++;
+      t.items += (r.sale_items || []).filter((i) => i.status === 'sold').length;
+      t.total += net;
+      t.discount += r.discount || 0;
+      t.refunded += r.refunded_amount || 0;
+      t[r.payment || 'none'] += net;
     }
     return t;
   }
 
   function totalsHtml(t) {
     return `<div class="totals">
-      <div><span>판매 건수</span><b>${t.count}건</b></div>
       <div class="sum"><span>총 매출</span><b>${won(t.total)}</b></div>
+      <div><span>결제 건수</span><b>${t.receipts}건 <small>(${t.items}점)</small></b></div>
       <div><span>현금</span><b>${won(t.cash)}</b></div>
       <div><span>카드</span><b>${won(t.card)}</b></div>
       <div><span>이체</span><b>${won(t.transfer)}</b></div>
+      ${t.discount ? `<div><span>할인 합계</span><b>${won(t.discount)}</b></div>` : ''}
+      ${t.refunded ? `<div><span>부분환불</span><b>${won(t.refunded)}</b></div>` : ''}
       ${t.none ? `<div><span>결제수단 미지정</span><b>${won(t.none)}</b></div>` : ''}
+      ${t.cancelled ? `<div><span>취소된 영수증</span><b>${t.cancelled}건</b></div>` : ''}
     </div>`;
   }
 
-  const canCancelSale = (r) =>
-    isCashier() ? r.sold_by === state.me.id && new Date(r.sold_at) >= new Date(kstStart(kstToday())) : canManage(r.store_id);
-
-  async function cancelSale(r) {
-    const reason = await promptBox(`${r.code} 판매 취소`, '사유 (예: 환불, 잘못 찍음)', '', '판매 취소', 'sell');
-    if (reason === null) return false;
-    const { error } = await sb.rpc('unsell_product', { p_id: r.id, p_reason: reason });
-    if (error) {
-      toast(errText(error), 'error');
-      return false;
-    }
-    toast(`${r.code} 판매를 취소했습니다 (판매중으로 복구)`);
-    return true;
-  }
+  const itemsLabel = (r) => {
+    const its = r.sale_items || [];
+    if (!its.length) return '-';
+    return `${esc(its[0].name || its[0].code)}${its.length > 1 ? ` 외 ${its.length - 1}개` : ''}`;
+  };
 
   async function loadToday() {
     const box = $('#todayList');
@@ -1470,24 +1825,165 @@
     $('#todayTotals').innerHTML = totalsHtml(salesTotals(rows));
     box.innerHTML = rows.length
       ? `<div class="sale-list">${rows
-          .slice(0, 50)
+          .slice(0, 60)
           .map(
-            (r) => `<div class="sale-row">
-            <span class="t">${hhmm(r.sold_at)}</span>
-            <span class="n"><b>${esc(r.code)}</b> ${esc(r.name)}<br><small class="hint">${esc(personName(r.sold_by))}</small></span>
-            <span class="p">${won(r.sold_price)}<br><small class="pay ${r.sold_payment || ''}">${PAY_LABEL[r.sold_payment] || '-'}</small></span>
-            ${canCancelSale(r) ? `<button class="btn small" data-cancel="${r.id}">취소</button>` : '<span></span>'}
+            (r) => `<div class="sale-row ${r.status}" data-sale="${r.id}">
+            <span class="t">${hhmm(r.created_at)}</span>
+            <span class="n">${itemsLabel(r)}<br><small class="hint">${esc(r.receipt_no.split('-').pop())}번 · ${esc(personName(r.created_by))}${
+              r.status === 'cancelled' ? ' · 취소됨' : ''
+            }</small></span>
+            <span class="p">${won(r.total)}<br><small class="pay ${r.payment || ''}">${PAY_LABEL[r.payment] || '-'}</small></span>
           </div>`
           )
-          .join('')}</div>`
+          .join('')}</div><p class="hint">목록을 누르면 영수증을 보고 출력·취소할 수 있습니다.</p>`
       : '<div class="empty" style="padding:20px 0">아직 오늘 판매가 없습니다</div>';
-    box.querySelectorAll('[data-cancel]').forEach(
-      (b) =>
-        (b.onclick = async () => {
-          const r = rows.find((x) => x.id === Number(b.dataset.cancel));
-          if (await cancelSale(r)) loadToday();
-          focusScanInput();
-        })
+    box.querySelectorAll('[data-sale]').forEach(
+      (el) => (el.onclick = () => openReceipt(Number(el.dataset.sale), () => (loadToday(), loadCash())))
+    );
+  }
+
+  // ---------------- 시재 ----------------
+  let cashState = null;
+  async function loadCash() {
+    const box = $('#cashBox');
+    if (!box) return;
+    if (!state.me.store_id) {
+      box.innerHTML = '<span class="hint">시재는 매장 계정에서 관리합니다 · 정산 화면에서 확인</span>';
+      return;
+    }
+    const { data, error } = await sb.rpc('cash_status', { p_store_id: state.me.store_id });
+    if (state.view !== 'sell') return;
+    if (error) return (box.innerHTML = `<span class="hint">시재 정보를 불러올 수 없습니다</span>`);
+    cashState = data;
+    box.innerHTML = data?.open
+      ? `<div class="cash-chip open"><span>🟢 영업 중 · 예상 현금 <b>${won(data.expected)}</b></span>
+          <button class="btn small" id="cashMove">입출금</button><button class="btn small" id="cashClose">마감</button></div>`
+      : `<div class="cash-chip"><span>⚪ 영업 전</span><button class="btn small primary" id="cashOpen">영업 시작 (시재 입력)</button></div>`;
+    const o = $('#cashOpen');
+    if (o) o.onclick = openCashDialog;
+    const m = $('#cashMove');
+    if (m) m.onclick = cashMoveDialog;
+    const c = $('#cashClose');
+    if (c) c.onclick = closeCashDialog;
+  }
+
+  function openCashDialog() {
+    modal(
+      `<h3>영업 시작</h3>
+      <p class="hint">돈통에 넣어둔 거스름돈(시작 시재)을 입력하세요.</p>
+      <label class="field"><span>시작 시재 (원)</span><input type="text" inputmode="numeric" id="ocAmt" placeholder="예: 100000"></label>
+      <label class="field"><span>메모</span><input type="text" id="ocMemo"></label>
+      <div class="err" data-err></div>
+      <div class="row"><button class="btn" data-x>취소</button><button class="btn primary" data-ok>영업 시작</button></div>`,
+      (bg, close) => {
+        $('#ocAmt', bg).focus();
+        $('[data-x]', bg).onclick = () => close();
+        $('[data-ok]', bg).onclick = (e) =>
+          busy(e.target, async () => {
+            const { error } = await sb.rpc('open_cash', {
+              p_store_id: state.me.store_id,
+              p_opening: numVal($('#ocAmt', bg).value) ?? 0,
+              p_memo: $('#ocMemo', bg).value,
+            });
+            if (error) return ($('[data-err]', bg).textContent = errText(error));
+            close();
+            toast('영업을 시작했습니다');
+            loadCash();
+            focusScanInput();
+          });
+      }
+    );
+  }
+
+  function cashMoveDialog() {
+    modal(
+      `<h3>입출금 기록</h3>
+      <div class="seg" id="mvKind"><button type="button" data-k="in" class="active">입금 (잔돈 보충 등)</button><button type="button" data-k="out">출금 (지출 등)</button></div>
+      <label class="field" style="margin-top:12px"><span>금액 (원)</span><input type="text" inputmode="numeric" id="mvAmt"></label>
+      <label class="field"><span>메모 (예: 택배비, 잔돈 보충)</span><input type="text" id="mvMemo"></label>
+      <div class="err" data-err></div>
+      <div class="row"><button class="btn" data-x>취소</button><button class="btn primary" data-ok>기록</button></div>`,
+      (bg, close) => {
+        let kind = 'in';
+        bg.querySelectorAll('[data-k]').forEach(
+          (b) =>
+            (b.onclick = () => {
+              kind = b.dataset.k;
+              bg.querySelectorAll('[data-k]').forEach((x) => x.classList.toggle('active', x === b));
+            })
+        );
+        $('[data-x]', bg).onclick = () => close();
+        $('[data-ok]', bg).onclick = (e) =>
+          busy(e.target, async () => {
+            const { error } = await sb.rpc('cash_move', {
+              p_session_id: cashState.session_id,
+              p_kind: kind,
+              p_amount: numVal($('#mvAmt', bg).value) ?? 0,
+              p_memo: $('#mvMemo', bg).value,
+            });
+            if (error) return ($('[data-err]', bg).textContent = errText(error));
+            close();
+            toast('기록했습니다');
+            loadCash();
+          });
+      }
+    );
+  }
+
+  const DENOMS = [50000, 10000, 5000, 1000, 500, 100];
+  function closeCashDialog() {
+    const c = cashState;
+    modal(
+      `<h3>영업 마감</h3>
+      <div class="cash-breakdown">
+        <div><span>시작 시재</span><b>${won(c.opening_cash)}</b></div>
+        <div><span>+ 현금 매출</span><b>${won(c.cash_sales)}</b></div>
+        <div><span>+ 입금</span><b>${won(c.moves_in)}</b></div>
+        <div><span>− 출금</span><b>${won(c.moves_out)}</b></div>
+        <div class="exp"><span>= 있어야 할 현금</span><b>${won(c.expected)}</b></div>
+      </div>
+      <p class="hint" style="margin:10px 0 6px">돈통 현금을 권종별로 세어 입력하세요 (또는 아래 합계에 바로 입력)</p>
+      <div class="denoms">${DENOMS.map(
+        (d) => `<label><span>${d.toLocaleString('ko-KR')}원</span><input type="text" inputmode="numeric" data-d="${d}" placeholder="0"> 개</label>`
+      ).join('')}</div>
+      <label class="field"><span>실제 현금 합계 (원)</span><input type="text" inputmode="numeric" id="ccCount"></label>
+      <div class="cash-total change"><span>과부족</span><b id="ccDiff">-</b></div>
+      <label class="field"><span>메모</span><input type="text" id="ccMemo"></label>
+      <div class="err" data-err></div>
+      <div class="row"><button class="btn" data-x>취소</button><button class="btn primary" data-ok>마감하기</button></div>`,
+      (bg, close) => {
+        const count = $('#ccCount', bg);
+        const showDiff = () => {
+          const v = numVal(count.value);
+          const el = $('#ccDiff', bg);
+          if (v == null) return (el.textContent = '-');
+          const d = v - c.expected;
+          el.textContent = d === 0 ? '0원 (딱 맞음)' : d > 0 ? `+${won(d)} 남음` : `${won(-d)} 부족`;
+          el.classList.toggle('short', d < 0);
+        };
+        bg.querySelectorAll('[data-d]').forEach(
+          (inp) =>
+            (inp.oninput = () => {
+              let sum = 0;
+              bg.querySelectorAll('[data-d]').forEach((x) => (sum += (numVal(x.value) ?? 0) * Number(x.dataset.d)));
+              count.value = sum;
+              showDiff();
+            })
+        );
+        count.oninput = showDiff;
+        $('[data-x]', bg).onclick = () => close();
+        $('[data-ok]', bg).onclick = (e) =>
+          busy(e.target, async () => {
+            const v = numVal(count.value);
+            if (v == null) return ($('[data-err]', bg).textContent = '실제 현금을 입력하세요');
+            const { data, error } = await sb.rpc('close_cash', { p_session_id: c.session_id, p_counted: v, p_memo: $('#ccMemo', bg).value });
+            if (error) return ($('[data-err]', bg).textContent = errText(error));
+            close();
+            const d = data.difference;
+            toast(`마감 완료 · 과부족 ${d === 0 ? '없음' : d > 0 ? `+${won(d)}` : `-${won(-d)}`}`);
+            loadCash();
+          });
+      }
     );
   }
 
@@ -1525,7 +2021,8 @@
       </div>
       <div id="sTotals" style="margin-top:14px"></div>
       <div id="sBySeller"></div>
-      <div class="row" style="margin:14px 0 8px"><h2 style="margin:0">판매 내역</h2><span></span>
+      <div id="sCash"></div>
+      <div class="row" style="margin:18px 0 8px"><h2 style="margin:0">영수증 목록</h2><span></span>
         <button class="btn small" id="sCsv">엑셀(CSV) 받기</button><button class="btn small" id="sPrint">인쇄</button></div>
       <div id="sList"></div>`
     );
@@ -1554,20 +2051,30 @@
         })
     );
     $('#sCsv').onclick = () => {
-      const head = ['판매일시', '매장', '상품코드', '상품명', '판매가', '결제수단', '판매자'];
-      const lines = settle.rows.map((r) =>
-        [
-          new Date(r.sold_at).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }),
-          storeName(r.sold_store_id),
-          r.code,
-          r.name,
-          r.sold_price ?? '',
-          PAY_LABEL[r.sold_payment] || '',
-          personName(r.sold_by),
-        ]
-          .map((v) => `"${String(v).replace(/"/g, '""')}"`)
-          .join(',')
-      );
+      const head = ['판매일시', '영수증번호', '매장', '상품코드', '상품명', '판매가', '영수증 결제금액', '할인', '결제수단', '판매자', '상태'];
+      const lines = [];
+      for (const r of settle.rows) {
+        const st = r.status === 'cancelled' ? '취소' : '완료';
+        for (const i of r.sale_items || []) {
+          lines.push(
+            [
+              new Date(r.created_at).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false }),
+              r.receipt_no,
+              storeName(r.store_id),
+              i.code,
+              i.name,
+              i.price,
+              r.total,
+              r.discount,
+              PAY_LABEL[r.payment] || '',
+              personName(r.created_by),
+              i.status === 'refunded' ? '환불' : st,
+            ]
+              .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
+              .join(',')
+          );
+        }
+      }
       const blob = new Blob(['﻿' + [head.join(','), ...lines].join('\r\n')], { type: 'text/csv;charset=utf-8' });
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
@@ -1585,8 +2092,18 @@
   async function loadSettle() {
     if (!$('#sList')) return;
     let rows;
+    let sessions = [];
     try {
       rows = await fetchSales(settle.from, settle.to, settle.store);
+      let cq = sb
+        .from('cash_sessions')
+        .select('*')
+        .gte('opened_at', kstStart(settle.from))
+        .lt('opened_at', kstStart(shiftDate(settle.to, 1)))
+        .order('opened_at', { ascending: false });
+      if (settle.store) cq = cq.eq('store_id', Number(settle.store));
+      const { data } = await cq;
+      sessions = data || [];
     } catch (e) {
       return toast(errText(e), 'error');
     }
@@ -1596,39 +2113,55 @@
     $('#sTotals').innerHTML = `<p class="hint" style="margin:0 0 6px">${period} · ${settle.store ? esc(storeName(Number(settle.store))) : '전체 매장'}</p>${totalsHtml(
       salesTotals(rows)
     )}`;
+
     const bySeller = {};
     for (const r of rows) {
-      const k = r.sold_by || '-';
+      if (r.status !== 'completed') continue;
+      const k = r.created_by || '-';
       bySeller[k] = bySeller[k] || { count: 0, total: 0 };
       bySeller[k].count++;
-      bySeller[k].total += Number(r.sold_price) || 0;
+      bySeller[k].total += (r.total || 0) - (r.refunded_amount || 0);
     }
-    $('#sBySeller').innerHTML = rows.length
-      ? `<h2>판매자별</h2><div class="table-wrap"><table><tr><th>판매자</th><th>건수</th><th>금액</th></tr>${Object.entries(bySeller)
+    $('#sBySeller').innerHTML = Object.keys(bySeller).length
+      ? `<h2>판매자별</h2><div class="table-wrap"><table><tr><th>판매자</th><th>결제 건수</th><th>금액</th></tr>${Object.entries(bySeller)
           .sort((a, b) => b[1].total - a[1].total)
           .map(([k, v]) => `<tr><td>${esc(personName(k))}</td><td>${v.count}건</td><td>${won(v.total)}</td></tr>`)
           .join('')}</table></div>`
       : '';
+
+    $('#sCash').innerHTML = sessions.length
+      ? `<h2>시재 기록</h2><div class="table-wrap"><table>
+        <tr><th>매장</th><th>영업 시작</th><th>마감</th><th>시작 시재</th><th>있어야 할 현금</th><th>실제 현금</th><th>과부족</th><th>메모</th></tr>
+        ${sessions
+          .map((c) => {
+            const d = c.difference;
+            return `<tr><td>${esc(storeName(c.store_id))}</td>
+              <td>${fmt(c.opened_at)}<br><small class="hint">${esc(personName(c.opened_by))}</small></td>
+              <td>${c.status === 'open' ? '<b>영업 중</b>' : `${fmt(c.closed_at)}<br><small class="hint">${esc(personName(c.closed_by))}</small>`}</td>
+              <td>${won(c.opening_cash)}</td><td>${c.expected_cash != null ? won(c.expected_cash) : '-'}</td>
+              <td>${c.counted_cash != null ? won(c.counted_cash) : '-'}</td>
+              <td class="${d < 0 ? 'neg' : d > 0 ? 'pos' : ''}">${d == null ? '-' : d === 0 ? '0원' : d > 0 ? `+${won(d)}` : `-${won(-d)}`}</td>
+              <td style="white-space:normal;min-width:120px">${esc(c.memo)}</td></tr>`;
+          })
+          .join('')}</table></div>`
+      : '';
+
     $('#sList').innerHTML = rows.length
       ? `<div class="table-wrap"><table>
-        <tr><th>일시</th><th>매장</th><th>상품</th><th>판매가</th><th>결제</th><th>판매자</th><th></th></tr>
+        <tr><th>일시</th><th>영수증</th><th>매장</th><th>상품</th><th>결제 금액</th><th>결제</th><th>판매자</th><th>상태</th></tr>
         ${rows
           .map(
-            (r) => `<tr><td>${fmt(r.sold_at)}</td><td>${esc(storeName(r.sold_store_id))}</td>
-            <td><b>${esc(r.code)}</b> ${esc(r.name)}</td><td>${won(r.sold_price)}</td>
-            <td><span class="pay ${r.sold_payment || ''}">${PAY_LABEL[r.sold_payment] || '-'}</span></td>
-            <td>${esc(personName(r.sold_by))}</td>
-            <td>${canCancelSale(r) ? `<button class="btn small" data-cancel="${r.id}">취소</button>` : ''}</td></tr>`
+            (r) => `<tr class="click ${r.status}" data-sale="${r.id}"><td>${fmt(r.created_at)}</td><td>${esc(r.receipt_no)}</td>
+            <td>${esc(storeName(r.store_id))}</td><td style="white-space:normal">${itemsLabel(r)}</td>
+            <td>${won(r.total)}${r.discount ? `<br><small class="hint">할인 ${won(r.discount)}</small>` : ''}${
+              r.refunded_amount ? `<br><small class="hint">환불 ${won(r.refunded_amount)}</small>` : ''
+            }</td>
+            <td><span class="pay ${r.payment || ''}">${PAY_LABEL[r.payment] || '-'}</span></td>
+            <td>${esc(personName(r.created_by))}</td><td>${r.status === 'cancelled' ? '취소' : '완료'}</td></tr>`
           )
-          .join('')}</table></div>`
+          .join('')}</table></div><p class="hint">줄을 누르면 영수증을 보고 출력·취소할 수 있습니다.</p>`
       : '<div class="empty">이 기간에 판매 내역이 없습니다</div>';
-    root.querySelectorAll('#sList [data-cancel]').forEach(
-      (b) =>
-        (b.onclick = async () => {
-          const r = rows.find((x) => x.id === Number(b.dataset.cancel));
-          if (await cancelSale(r)) loadSettle();
-        })
-    );
+    root.querySelectorAll('#sList [data-sale]').forEach((el) => (el.onclick = () => openReceipt(Number(el.dataset.sale), loadSettle)));
   }
 
   // ---------------- 라벨 출력 (QR 또는 바코드 선택 → 인쇄 / 이미지 저장) ----------------

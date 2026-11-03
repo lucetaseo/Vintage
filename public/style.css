@@ -237,3 +237,75 @@ tr.inactive td { color: var(--muted); text-decoration: line-through; }
   .a4-page { position: relative; width: 210mm; height: 297mm; page-break-after: always; break-after: page; }
   .label { box-shadow: none !important; }
 }
+
+/* ---------- 장바구니 판매 ---------- */
+.pos-head { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; justify-content: space-between; margin-bottom: 10px; }
+.pos-head h1 { margin: 0; }
+.cash-chip { display: flex; align-items: center; gap: 6px; flex-wrap: wrap; background: var(--card); border: 1px solid var(--line); border-radius: 999px; padding: 4px 6px 4px 12px; font-size: 13px; }
+.cash-chip.open { border-color: var(--ok); }
+.scan-msg { margin: 10px 0; padding: 10px 12px; border-radius: 10px; font-size: 15px; }
+.scan-msg.ok { background: var(--ok-bg); color: var(--ok); }
+.scan-msg.warn { background: #fff3cd; color: #7a5a00; }
+.scan-msg.error { background: var(--sold-bg); color: var(--sold); }
+.scan-msg.none, .scan-msg.info { background: #eee8e1; color: var(--muted); }
+.scan-msg.done { background: var(--ok-bg); color: var(--ok); border: 2px solid var(--ok); font-size: 17px; }
+.cart { background: var(--card); border: 2px solid var(--ink); border-radius: var(--radius); padding: 12px; margin-top: 10px; }
+.cart-empty { border-style: dashed; border-color: var(--line); text-align: center; color: var(--muted); padding: 26px 12px; }
+.cart-row { display: grid; grid-template-columns: 48px 1fr 110px auto; gap: 10px; align-items: center; padding: 8px 0; border-bottom: 1px solid var(--line); }
+.cart-row img { width: 48px; height: 48px; object-fit: cover; border-radius: 6px; background: #ece5dc; }
+.cart-row .cn { min-width: 0; font-size: 14px; line-height: 1.3; }
+.cart-row .cn small { color: var(--muted); }
+.cart-row .cp input { text-align: right; padding: 8px; font-weight: 700; }
+.cart-row .cp small { display: block; text-align: right; }
+.cart-row.gone { background: var(--sold-bg); }
+.cart-row.gone img { filter: grayscale(1); }
+.gone-msg { color: var(--sold) !important; font-weight: 700; }
+.cart-sum > div { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0; }
+.cart-sum input { width: 130px; text-align: right; padding: 8px; }
+.cart-total { border-top: 2px solid var(--ink); margin-top: 4px; padding-top: 10px !important; }
+.cart-total b { font-size: 26px; }
+.receipt-opts { display: flex; gap: 14px; flex-wrap: wrap; margin-top: 10px; font-size: 13px; color: var(--muted); }
+.receipt-opts label { display: flex; align-items: center; gap: 6px; }
+.receipt-opts select { width: auto; padding: 4px 8px; }
+.cash-total { display: flex; justify-content: space-between; align-items: center; background: #f1ece5; border-radius: 10px; padding: 10px 12px; margin-bottom: 12px; }
+.cash-total b { font-size: 22px; }
+.cash-total.change b { color: var(--ok); }
+.cash-total b.short, #ccDiff.short { color: var(--sold); }
+.quick-cash { display: flex; flex-wrap: wrap; gap: 6px; margin: -4px 0 12px; }
+.cash-breakdown > div { display: flex; justify-content: space-between; padding: 4px 0; font-size: 14px; }
+.cash-breakdown .exp { border-top: 1px solid var(--line); margin-top: 4px; padding-top: 8px; font-size: 16px; }
+.denoms { display: grid; grid-template-columns: repeat(2, 1fr); gap: 6px 12px; margin-bottom: 12px; }
+.denoms label { display: flex; align-items: center; gap: 6px; font-size: 13px; }
+.denoms label span { width: 66px; white-space: nowrap; text-align: right; flex: none; }
+.denoms input { padding: 6px 8px; text-align: right; }
+.sale-row { cursor: pointer; grid-template-columns: 46px 1fr auto !important; }
+.sale-row:hover { background: #f4efe8; }
+.sale-row.cancelled .n, .sale-row.cancelled .p { text-decoration: line-through; color: var(--muted); }
+tr.click { cursor: pointer; }
+tr.click:hover td { background: #f4efe8; }
+tr.cancelled td { color: var(--muted); text-decoration: line-through; }
+td.neg { color: var(--sold); font-weight: 700; }
+td.pos { color: #2a5a9a; font-weight: 700; }
+.modal { max-height: 92vh; overflow-y: auto; }
+
+/* ---------- 영수증 ---------- */
+.receipt { background: #fff; color: #000; font-family: "Malgun Gothic", "Apple SD Gothic Neo", "Noto Sans KR", sans-serif; font-size: 12px; line-height: 1.45; padding: 4mm 0; }
+.receipt-preview { background: #fff; border: 1px solid var(--line); border-radius: 8px; padding: 8px 14px; max-height: 60vh; overflow-y: auto; }
+.receipt-preview .receipt { width: auto !important; }
+.r-title { text-align: center; font-size: 17px; font-weight: 800; }
+.r-info { text-align: center; font-size: 11px; }
+.r-hr { border-top: 1px dashed #000; margin: 6px 0; }
+.r-line { display: flex; justify-content: space-between; gap: 8px; }
+.r-line span:last-child { text-align: right; white-space: nowrap; }
+.r-item { margin-bottom: 3px; }
+.r-item.refunded { color: #666; text-decoration: line-through; }
+.r-total { font-size: 15px; font-weight: 800; margin: 2px 0; }
+.r-cancel { text-align: center; font-weight: 800; margin-top: 4px; }
+.r-foot { text-align: center; font-size: 11px; white-space: pre-wrap; }
+@media print {
+  #printArea .receipt { padding: 2mm 0; }
+}
+@media (max-width: 640px) {
+  .cart-row { grid-template-columns: 40px 1fr 92px auto; gap: 6px; }
+  .cart-row img { width: 40px; height: 40px; }
+}
