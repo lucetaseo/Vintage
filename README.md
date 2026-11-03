@@ -24,7 +24,7 @@ public/                  ← 호스팅(도메인)에 올리는 폴더
   vendor/                ← supabase-js 라이브러리
 supabase/
   schema.sql             ← 테이블·권한·판매처리 함수·사진저장소 (SQL Editor에서 실행)
-  bootstrap-admin.sql    ← 최초 관리자 연결
+  bootstrap-admin.sql    ← (선택) 대시보드에서 직접 관리자 연결
   functions/admin-users/ ← 관리자 전용 계정 생성/수정 함수
 ```
 
@@ -52,17 +52,17 @@ supabase/
    - 기본 매장 `1호점`, `2호점`, `3호점`과 사진 저장소 `photos`가 만들어집니다.
 
 ### 2. 로그인 설정
-**Authentication → Sign In / Providers** 에서:
-- **Allow new users to sign up → 끄기** (관리자만 계정을 만들 수 있도록)
-- Email provider는 켜두고, **Confirm email → 끄기**
+**Authentication → Sign In / Providers → Email** 에서 **Confirm email → 끄기**
+> "Allow new users to sign up" 은 **최초 관리자를 만들 때까지 켜둡니다** (3번 끝나고 끄기).
 
-### 3. 최초 관리자 만들기
-[`supabase/bootstrap-admin.sql`](supabase/bootstrap-admin.sql) 상단 설명대로 진행합니다.
-1. Authentication → Users → **Add user** 에서 이메일 `admin@vintage.local`과 비밀번호를 입력하고, **Auto Confirm** 을 체크합니다.
-2. SQL Editor에서 `bootstrap-admin.sql`을 실행합니다.
+### 3. 최초 관리자 만들기 (앱에서)
+앱(5·6번 이후 배포된 주소, 또는 로컬 미리보기)을 처음 열면 **"최초 관리자 만들기"** 화면이 나옵니다.
+아이디/이름/비밀번호를 넣고 [관리자 만들기]를 누르면 바로 관리자로 로그인됩니다.
+관리자가 한 명이라도 생기면 이 화면은 다시 나오지 않습니다.
 
-이제 앱에서 아이디 `admin`으로 로그인할 수 있습니다.
+그다음 **Authentication → Sign In / Providers → "Allow new users to sign up" 끄기** 를 꼭 해주세요.
 > 로그인 아이디는 내부적으로 `아이디@vintage.local` 이메일로 저장됩니다. 실제 메일은 발송되지 않습니다.
+> (앱 없이 대시보드로 직접 만드는 방법은 [`supabase/bootstrap-admin.sql`](supabase/bootstrap-admin.sql) 참고)
 
 ### 4. 계정 생성 함수(Edge Function) 배포
 관리자 화면에서 실장 계정을 만들 때 쓰는 함수입니다.

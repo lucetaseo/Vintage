@@ -286,6 +286,34 @@ begin
   return v_prefix || lpad(n::text, 3, '0');
 end $$;
 
+-- ---------- 최초 관리자 설정 (관리자가 한 명도 없을 때만 동작) ----------
+create or replace function public.needs_setup() returns boolean
+language sql stable security definer set search_path = public as $$
+  select not exists (select 1 from profiles where role = 'admin');
+$$;
+
+create or replace function public.claim_admin(p_username text, p_name text)
+returns void
+language plpgsql security definer set search_path = public as $$
+declare
+  v_username text := lower(trim(coalesce(p_username, '')));
+begin
+  if auth.uid() is null then raise exception '로그인이 필요합니다'; end if;
+  lock table profiles in share row exclusive mode;  -- 동시에 두 명이 시도해도 한 명만 성공
+  if exists (select 1 from profiles where role = 'admin') then
+    raise exception '이미 관리자가 있습니다. 관리자에게 계정을 받으세요';
+  end if;
+  if v_username !~ '^[a-z0-9_.-]{3,30}$' then raise exception '아이디는 영문 소문자/숫자 3~30자로 입력하세요'; end if;
+  insert into profiles (id, username, name, role)
+  values (auth.uid(), v_username, coalesce(nullif(trim(p_name), ''), '관리자'), 'admin')
+  on conflict (id) do update set role = 'admin', active = true, username = excluded.username, name = excluded.name;
+end $$;
+
+revoke execute on function public.needs_setup() from public;
+revoke execute on function public.claim_admin(text, text) from public, anon;
+grant execute on function public.needs_setup() to anon, authenticated;
+grant execute on function public.claim_admin(text, text) to authenticated;
+
 -- 함수는 로그인한 사용자만 호출
 revoke execute on function public.create_product(text, text, integer, text, bigint, text, text) from public, anon;
 revoke execute on function public.update_product(bigint, text, text, integer, text, bigint, text, text) from public, anon;

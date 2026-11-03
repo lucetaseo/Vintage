@@ -336,6 +336,68 @@
         await afterLogin();
       });
     };
+    checkSetup();
+  }
+
+  // 관리자가 아직 한 명도 없으면 "최초 관리자 만들기" 화면으로 전환
+  async function checkSetup() {
+    const { data } = await sb.rpc('needs_setup');
+    if (data === true && state.view === 'login') renderSetup();
+  }
+
+  function renderSetup() {
+    state.view = 'setup';
+    root.innerHTML = `
+      <div class="login-wrap"><form class="card login" id="setupForm" autocomplete="off">
+        <h1>VINTAGE</h1><p class="sub">처음 오셨네요! 최초 관리자 계정을 만드세요</p>
+        <label class="field"><span>관리자 아이디 (영문/숫자)</span><input type="text" name="username" value="admin" autocapitalize="none" required></label>
+        <label class="field"><span>이름</span><input type="text" name="name" value="관리자" required></label>
+        <label class="field"><span>비밀번호 (6자 이상)</span><input type="password" name="password" autocomplete="new-password" minlength="6" required></label>
+        <label class="field"><span>비밀번호 확인</span><input type="password" name="password2" autocomplete="new-password" minlength="6" required></label>
+        <div class="err" id="setupErr"></div>
+        <button class="btn primary block">관리자 만들기</button>
+        <p class="hint" style="text-align:center;margin-top:14px">이 화면은 관리자가 생기면 다시 나오지 않습니다</p>
+      </form></div>`;
+    const f = $('#setupForm');
+    const showErr = (m) => ($('#setupErr').textContent = m);
+    f.onsubmit = async (e) => {
+      e.preventDefault();
+      const username = f.username.value.trim().toLowerCase();
+      if (!/^[a-z0-9_.-]{3,30}$/.test(username)) return showErr('아이디는 영문 소문자/숫자 3~30자로 입력하세요');
+      if (f.password.value !== f.password2.value) return showErr('비밀번호가 서로 다릅니다');
+      await busy($('button', f), async () => {
+        const email = `${username}@${DOMAIN}`;
+        const password = f.password.value;
+        let { data, error } = await sb.auth.signUp({ email, password });
+        if (error && /already (registered|exists)/i.test(error.message)) {
+          ({ data, error } = await sb.auth.signInWithPassword({ email, password }));
+        }
+        if (error) {
+          if (/sign ?ups? (are )?(not allowed|disabled)/i.test(error.message)) {
+            return showErr("Supabase > Authentication > Sign In / Providers 에서 'Allow new users to sign up'을 잠깐 켠 뒤 다시 누르세요");
+          }
+          return showErr(errText(error));
+        }
+        if (!data.session) {
+          return showErr("Supabase > Authentication > Sign In / Providers > Email 에서 'Confirm email'을 끈 뒤 다시 누르세요");
+        }
+        const { error: e2 } = await sb.rpc('claim_admin', { p_username: username, p_name: f.name.value });
+        if (e2) {
+          await sb.auth.signOut();
+          return renderLogin(errText(e2));
+        }
+        if (!(await loadMe())) return showErr('관리자 설정에 실패했습니다. 다시 시도하세요');
+        await afterLogin();
+        confirmBox(
+          '관리자 계정이 만들어졌습니다 🎉',
+          `<p>아이디 <b>${esc(username)}</b> 로 로그인되었습니다.</p>
+           <p><b>마지막으로 꼭 해주세요:</b><br>Supabase 대시보드 → Authentication → Sign In / Providers →
+           <b>'Allow new users to sign up' 끄기</b><br>
+           <span class="hint">(끄지 않으면 아무나 가입은 할 수 있어요. 데이터는 못 보지만 깔끔하게 막아두세요)</span></p>`,
+          '확인했어요'
+        );
+      });
+    };
   }
 
   async function afterLogin() {
