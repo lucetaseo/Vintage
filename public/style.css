@@ -395,3 +395,6 @@ tr.muted td { color: var(--muted); }
 .pt-how { font-size: calc(var(--u) * 3.8); }
 .pt-foot { margin-top: auto; padding-top: calc(var(--u) * 3); font-size: calc(var(--u) * 3.4); letter-spacing: .06em; opacity: .85; }
 @media print { #printArea .poster { box-shadow: none; } }
+
+.store-pick { display: flex; align-items: center; gap: 6px; font-size: 13px; font-weight: 700; color: var(--muted); }
+.store-pick select { width: auto; padding: 6px 10px; font-weight: 700; color: var(--ink); border: 2px solid var(--accent); }

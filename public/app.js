@@ -316,7 +316,9 @@
     e.preventDefault();
     installPrompt = e;
     const b = $('#installBtn');
-    if (b) b.hidden = false;
+    if (b && !isAdmin()) b.hidden = false; // 관리자·총관리자는 내정보에서만 설치
+    const b2 = $('#install2');
+    if (b2) b2.hidden = false;
   });
   async function doInstall() {
     if (!installPrompt) return location.assign('#/account');
@@ -387,7 +389,7 @@
           ${isAdmin() ? link('#/admin', 'admin', '관리자') : ''}
           ${isSuper() ? link('#/license', 'license', '이용관리') : ''}
           ${link('#/account', 'account', '내정보')}
-          <a href="#" id="installBtn" ${installPrompt ? '' : 'hidden'}>앱 설치</a>
+          <a href="#" id="installBtn" ${installPrompt && !isAdmin() ? '' : 'hidden'}>앱 설치</a>
         </nav>
         <div class="who">${esc(me.name)} · ${ROLE_LABEL[me.role]}${me.store_id ? ` · ${esc(storeName(me.store_id))}` : ''}</div>
       </header>
@@ -1851,7 +1853,7 @@
         ${
           standalone
             ? '<p>✅ 앱으로 실행 중입니다.</p>'
-            : `${installPrompt ? '<button class="btn primary" id="install2">이 기기에 앱 설치</button>' : ''}
+            : `<button class="btn primary" id="install2" ${installPrompt ? '' : 'hidden'}>이 기기에 앱 설치</button>
           <p class="hint" style="font-size:14px;line-height:1.7">
           <b>안드로이드 (크롬)</b>: 메뉴 ⋮ → <b>앱 설치</b> 또는 <b>홈 화면에 추가</b><br>
           <b>아이폰 (사파리)</b>: 공유 버튼 □↑ → <b>홈 화면에 추가</b><br>
@@ -2095,6 +2097,23 @@
     focusScanInput();
   }
 
+  // 판매 매장: 실장·캐셔는 자기 매장 고정, 관리자·총관리자는 화면에서 선택 (마지막 선택 기억)
+  function sellStoreId() {
+    if (state.me.store_id && !isAdmin()) return state.me.store_id;
+    const saved = Number(pref('sellStore'));
+    if (state.stores.some((s) => s.id === saved)) return saved;
+    return cart.items[0]?.store_id || state.me.store_id || state.stores[0]?.id || null;
+  }
+  function setSellStore(id) {
+    pref('sellStore', String(id));
+    const sel = $('#sellStore');
+    if (sel) sel.value = String(id);
+    const lbl = $('#todayStore');
+    if (lbl) lbl.textContent = storeName(id);
+    loadCash();
+    loadToday();
+  }
+
   function viewSell() {
     state.view = 'sell';
     loadCart();
@@ -2109,7 +2128,13 @@
       'sell',
       `<div class="pos">
         <div class="pos-main">
-          <div class="pos-head"><h1>상품 판매</h1><div id="cashBox"></div></div>
+          <div class="pos-head"><h1>상품 판매</h1>${
+            isAdmin()
+              ? `<label class="store-pick">판매 매장 <select id="sellStore">${state.stores
+                  .map((st) => `<option value="${st.id}" ${st.id === sellStoreId() ? 'selected' : ''}>${esc(st.name)}</option>`)
+                  .join('')}</select></label>`
+              : ''
+          }<div id="cashBox"></div></div>
           <input type="text" id="scanInput" class="pos-input" placeholder="바코드/QR을 찍거나 상품코드 입력 후 Enter" autocomplete="off" autocapitalize="characters" enterkeyhint="go">
           <div id="reader" class="reader"></div>
           <button class="btn block" id="camBtn">📷 카메라로 찍기</button>
@@ -2117,7 +2142,7 @@
           <div id="cart"></div>
         </div>
         <div class="pos-side">
-          <h2>오늘 판매 <small class="hint">${me.store_id ? esc(storeName(me.store_id)) : '전체 매장'}</small></h2>
+          <h2>오늘 판매 <small class="hint" id="todayStore">${esc(storeName(sellStoreId()))}</small></h2>
           <div id="todayTotals"></div>
           <div id="todayList"></div>
           <p><a href="#/settle">정산 자세히 보기 →</a></p>
@@ -2137,6 +2162,16 @@
       if (!e.target.closest('input, button, a, select, textarea, label, .sale-row')) focusScanInput();
     });
     $('#camBtn').onclick = startCamera;
+    const ss = $('#sellStore');
+    if (ss)
+      ss.onchange = () => {
+        const id = Number(ss.value);
+        if (cart.items.length && cart.items[0].store_id !== id) {
+          ss.value = String(cart.items[0].store_id);
+          return toast('장바구니에 다른 매장 상품이 있습니다. 결제하거나 비운 뒤 바꾸세요', 'error');
+        }
+        setSellStore(id);
+      };
     renderCart();
     focusScanInput();
     if (isTouch()) startCamera(); // 휴대폰은 바로 카메라
@@ -2238,6 +2273,10 @@
     } else if (cart.items.length && cart.items[0].store_id !== p.store_id) {
       scanMsg('warn', `<b>${esc(p.code)}</b> 다른 매장(${esc(storeName(p.store_id))}) 상품은 한 영수증에 담을 수 없습니다`);
     } else {
+      if (isAdmin() && !cart.items.length && p.store_id !== sellStoreId()) {
+        setSellStore(p.store_id);
+        toast(`판매 매장을 ${storeName(p.store_id)}(으)로 바꿨습니다`);
+      }
       cart.items.push({
         id: p.id,
         code: p.code,
@@ -2485,7 +2524,7 @@
         $('#mpGo', bg).onclick = search;
         $('#mpQr', bg).onclick = () => {
           close(null);
-          showJoinQr(cart.items[0]?.store_id || state.me.store_id || state.stores[0]?.id);
+          showJoinQr(cart.items[0]?.store_id || sellStoreId());
         };
         q.onkeydown = (e) => e.key === 'Enter' && search();
         $('#mpSave', bg).onclick = (e) =>
@@ -2826,7 +2865,7 @@
     const today = kstToday();
     let rows;
     try {
-      rows = await fetchSales(today, today, state.me.store_id);
+      rows = await fetchSales(today, today, sellStoreId());
     } catch (e) {
       return toast(errText(e), 'error');
     }
@@ -2856,11 +2895,12 @@
   async function loadCash() {
     const box = $('#cashBox');
     if (!box) return;
-    if (!state.me.store_id) {
-      box.innerHTML = '<span class="hint">시재는 매장 계정에서 관리합니다 · 정산 화면에서 확인</span>';
+    const storeId = sellStoreId();
+    if (!storeId) {
+      box.innerHTML = '<span class="hint">매장을 먼저 추가하세요</span>';
       return;
     }
-    const { data, error } = await sb.rpc('cash_status', { p_store_id: state.me.store_id });
+    const { data, error } = await sb.rpc('cash_status', { p_store_id: storeId });
     if (state.view !== 'sell') return;
     if (error) return (box.innerHTML = `<span class="hint">시재 정보를 불러올 수 없습니다</span>`);
     cashState = data;
@@ -2890,7 +2930,7 @@
         $('[data-ok]', bg).onclick = (e) =>
           busy(e.target, async () => {
             const { error } = await sb.rpc('open_cash', {
-              p_store_id: state.me.store_id,
+              p_store_id: sellStoreId(),
               p_opening: numVal($('#ocAmt', bg).value) ?? 0,
               p_memo: $('#ocMemo', bg).value,
             });
