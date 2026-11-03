@@ -61,6 +61,9 @@ alter table public.products drop constraint if exists products_sold_payment_chec
 alter table public.products add constraint products_sold_payment_check check (sold_payment in ('cash', 'card', 'transfer'));
 create index if not exists products_sold_store_idx on public.products (sold_store_id, sold_at desc);
 
+-- 계정 삭제 표시 (판매 기록이 있는 계정은 기록용 이름만 남기고 삭제 처리)
+alter table public.profiles add column if not exists deleted_at timestamptz;
+
 -- 기존 설치본 업그레이드: 총관리자(super) 등급 허용
 alter table public.profiles drop constraint if exists profiles_role_check;
 alter table public.profiles add constraint profiles_role_check check (role in ('super', 'admin', 'manager', 'cashier'));
@@ -120,6 +123,16 @@ create table if not exists public.coupons (
   active     boolean not null default true,
   created_at timestamptz not null default now()
 );
+
+-- 포인트 설정 (한 줄)
+create table if not exists public.app_settings (
+  id              int primary key default 1 check (id = 1),
+  points_enabled  boolean not null default true,
+  point_rate      numeric(5, 2) not null default 1 check (point_rate >= 0 and point_rate <= 100),  -- 결제금액의 % 적립
+  point_min_use   integer not null default 1000 check (point_min_use >= 0),                       -- 최소 사용 포인트
+  updated_at      timestamptz not null default now()
+);
+insert into public.app_settings (id) values (1) on conflict (id) do nothing;
 
 -- ---------- 시재 (영업 시작 ~ 마감 현금 관리) ----------
 create table if not exists public.cash_sessions (
@@ -272,6 +285,7 @@ alter table public.cash_moves     enable row level security;
 alter table public.members        enable row level security;
 alter table public.coupons        enable row level security;
 alter table public.point_ledger   enable row level security;
+alter table public.app_settings   enable row level security;
 
 drop policy if exists "stores read"   on public.stores;
 drop policy if exists "stores admin"  on public.stores;
@@ -285,6 +299,7 @@ drop policy if exists "cash moves read"   on public.cash_moves;
 drop policy if exists "members read"      on public.members;
 drop policy if exists "coupons read"      on public.coupons;
 drop policy if exists "point ledger read" on public.point_ledger;
+drop policy if exists "settings read"     on public.app_settings;
 drop policy if exists "products read" on public.products;
 drop policy if exists "events read"   on public.product_events;
 
@@ -302,6 +317,7 @@ create policy "cash moves read"    on public.cash_moves    for select to authent
 create policy "members read"       on public.members       for select to authenticated using (public.is_active());
 create policy "coupons read"       on public.coupons       for select to authenticated using (public.is_active());
 create policy "point ledger read"  on public.point_ledger  for select to authenticated using (public.is_active());
+create policy "settings read"      on public.app_settings  for select to authenticated using (public.is_active());
 -- 매장 영수증 정보(상호 등)는 관리자가 stores 테이블에서 직접 수정 ("stores admin" 정책)
 -- profiles 생성/수정은 관리자 전용 Edge Function(admin-users)이 service_role 로 처리합니다.
 
@@ -407,10 +423,14 @@ end $$;
 -- p_items: [{"id": 상품ID, "price": 판매가(생략 시 등록가)}, ...]
 -- 상품 행을 잠그고(for update) 확인하므로 두 매장에서 동시에 결제해도 한 곳만 성공합니다.
 drop function if exists public.checkout(jsonb, integer, text, integer, text);
+drop function if exists public.checkout(jsonb, integer, text, integer, text, jsonb);
 -- p_external (선택): 토스플레이스 등 외부 결제 정보 {"provider":"tossplace","payment_id":"...","order_id":"...","data":{...}}
+-- p_member_id / p_points_used / p_coupon_code (선택): 회원 적립·포인트 사용·쿠폰
+-- 계산 순서: 상품 합계 - 추가 할인 - 쿠폰 할인 - 포인트 사용 = 결제 금액 → 결제 금액의 n% 적립
 create or replace function public.checkout(
   p_items jsonb, p_discount integer default 0, p_payment text default null,
-  p_received_cash integer default null, p_memo text default '', p_external jsonb default null
+  p_received_cash integer default null, p_memo text default '', p_external jsonb default null,
+  p_member_id bigint default null, p_points_used integer default 0, p_coupon_code text default null
 ) returns jsonb
 language plpgsql security definer set search_path = public as $$
 declare
@@ -432,6 +452,13 @@ declare
   v_session bigint;
   v_sale    bigint;
   v_paylbl  text;
+  v_member  members;
+  v_coupon  coupons;
+  v_cdisc   integer := 0;
+  v_pused   integer := coalesce(p_points_used, 0);
+  v_pearn   integer := 0;
+  v_set     app_settings;
+  v_today   date := (now() at time zone 'Asia/Seoul')::date;
 begin
   if p_items is null or jsonb_typeof(p_items) <> 'array' or jsonb_array_length(p_items) = 0 then
     raise exception '결제할 상품이 없습니다';
@@ -480,6 +507,44 @@ begin
 
   v_total := v_sub - v_disc;
   if v_total < 0 then raise exception '할인이 상품 합계보다 큽니다'; end if;
+
+  -- 쿠폰
+  if nullif(trim(coalesce(p_coupon_code, '')), '') is not null then
+    select * into v_coupon from coupons where upper(code) = upper(trim(p_coupon_code)) for update;
+    if not found then raise exception '없는 쿠폰 코드입니다'; end if;
+    if not v_coupon.active then raise exception '사용이 중지된 쿠폰입니다'; end if;
+    if v_coupon.starts_on is not null and v_today < v_coupon.starts_on then raise exception '아직 사용 기간이 아닌 쿠폰입니다'; end if;
+    if v_coupon.ends_on is not null and v_today > v_coupon.ends_on then raise exception '사용 기간이 지난 쿠폰입니다'; end if;
+    if v_coupon.max_uses is not null and v_coupon.used_count >= v_coupon.max_uses then raise exception '사용 횟수가 모두 끝난 쿠폰입니다'; end if;
+    if v_total < v_coupon.min_total then
+      raise exception '쿠폰 최소 결제금액(%원) 이상부터 사용할 수 있습니다', to_char(v_coupon.min_total, 'FM999,999,999');
+    end if;
+    v_cdisc := case when v_coupon.kind = 'amount' then least(v_coupon.value, v_total)
+                    else floor(v_total * least(v_coupon.value, 100) / 100.0)::integer end;
+    v_total := v_total - v_cdisc;
+    update coupons set used_count = used_count + 1 where id = v_coupon.id;
+  end if;
+
+  -- 회원 / 포인트
+  select * into v_set from app_settings where id = 1;
+  if p_member_id is not null then
+    select * into v_member from members where id = p_member_id for update;
+    if not found then raise exception '회원을 찾을 수 없습니다'; end if;
+  end if;
+  if v_pused < 0 then raise exception '포인트가 올바르지 않습니다'; end if;
+  if v_pused > 0 then
+    if v_member.id is null then raise exception '포인트를 쓰려면 회원을 선택하세요'; end if;
+    if not coalesce(v_set.points_enabled, true) then raise exception '포인트 사용이 꺼져 있습니다'; end if;
+    if v_pused < coalesce(v_set.point_min_use, 0) then
+      raise exception '포인트는 %P 이상부터 사용할 수 있습니다', to_char(v_set.point_min_use, 'FM999,999,999');
+    end if;
+    if v_pused > v_member.points then raise exception '보유 포인트(%P)보다 많이 쓸 수 없습니다', to_char(v_member.points, 'FM999,999,999'); end if;
+    if v_pused > v_total then raise exception '포인트는 결제 금액까지만 쓸 수 있습니다'; end if;
+    v_total := v_total - v_pused;
+  end if;
+  if v_member.id is not null and coalesce(v_set.points_enabled, true) then
+    v_pearn := floor(v_total * coalesce(v_set.point_rate, 0) / 100.0)::integer;
+  end if;
   if p_payment = 'cash' then
     if p_received_cash is not null and p_received_cash < v_total then
       raise exception '받은 금액이 결제 금액보다 적습니다';
@@ -495,15 +560,27 @@ begin
 
   insert into sales (receipt_no, store_id, session_id, item_count, subtotal, discount, total, payment,
                      cash_amount, card_amount, transfer_amount, received_cash, change_cash, memo, created_by,
-                     ext_provider, ext_payment_id, ext_order_id, ext_data)
+                     ext_provider, ext_payment_id, ext_order_id, ext_data,
+                     member_id, points_used, points_earned, coupon_id, coupon_discount)
   values (v_no, v_store, v_session, array_length(v_ids, 1), v_sub, v_disc, v_total, p_payment,
           case when p_payment = 'cash' then v_total else 0 end,
           case when p_payment = 'card' then v_total else 0 end,
           case when p_payment = 'transfer' then v_total else 0 end,
           case when p_payment = 'cash' then coalesce(p_received_cash, v_total) end, v_change,
           trim(coalesce(p_memo, '')), v_me.id,
-          p_external->>'provider', p_external->>'payment_id', p_external->>'order_id', p_external->'data')
+          p_external->>'provider', p_external->>'payment_id', p_external->>'order_id', p_external->'data',
+          v_member.id, v_pused, v_pearn, v_coupon.id, v_cdisc)
   returning id into v_sale;
+
+  if v_member.id is not null and (v_pused > 0 or v_pearn > 0) then
+    update members set points = points - v_pused + v_pearn where id = v_member.id;
+    if v_pused > 0 then
+      insert into point_ledger (member_id, sale_id, delta, reason, user_id) values (v_member.id, v_sale, -v_pused, '사용 · 영수증 ' || v_no, v_me.id);
+    end if;
+    if v_pearn > 0 then
+      insert into point_ledger (member_id, sale_id, delta, reason, user_id) values (v_member.id, v_sale, v_pearn, '적립 · 영수증 ' || v_no, v_me.id);
+    end if;
+  end if;
 
   v_paylbl := case p_payment when 'cash' then '현금' when 'card' then '카드' when 'transfer' then '이체' end;
   for v_e in select * from jsonb_array_elements(p_items) loop
@@ -519,7 +596,8 @@ begin
             v_me.id, v_store);
   end loop;
 
-  return jsonb_build_object('sale_id', v_sale, 'receipt_no', v_no, 'total', v_total, 'change', v_change);
+  return jsonb_build_object('sale_id', v_sale, 'receipt_no', v_no, 'total', v_total, 'change', v_change,
+                            'points_earned', v_pearn, 'points_used', v_pused, 'coupon_discount', v_cdisc);
 end $$;
 
 -- 상품 1개 판매 (상품 상세 화면용) → 영수증 1장으로 처리
@@ -528,7 +606,7 @@ create or replace function public.sell_product(p_id bigint, p_sold_price integer
 returns void
 language plpgsql security definer set search_path = public as $$
 begin
-  perform public.checkout(jsonb_build_array(jsonb_build_object('id', p_id, 'price', p_sold_price)), 0, p_payment, null, '', null);
+  perform public.checkout(p_items => jsonb_build_array(jsonb_build_object('id', p_id, 'price', p_sold_price)), p_payment => p_payment);
 end $$;
 
 -- ---------- 영수증 취소 (전체) ----------
@@ -555,6 +633,19 @@ begin
   update sales set status = 'cancelled', cancelled_at = now(), cancelled_by = v_me.id,
          cancel_reason = trim(coalesce(p_reason, ''))
    where id = p_sale_id;
+  -- 포인트: 사용한 것은 돌려주고, 적립한 것은 회수 / 쿠폰: 사용 횟수 되돌림
+  if v_s.member_id is not null and (v_s.points_used > 0 or v_s.points_earned > 0) then
+    update members set points = points + v_s.points_used - v_s.points_earned where id = v_s.member_id;
+    if v_s.points_used > 0 then
+      insert into point_ledger (member_id, sale_id, delta, reason, user_id) values (v_s.member_id, p_sale_id, v_s.points_used, '사용 취소 · 영수증 ' || v_s.receipt_no, v_me.id);
+    end if;
+    if v_s.points_earned > 0 then
+      insert into point_ledger (member_id, sale_id, delta, reason, user_id) values (v_s.member_id, p_sale_id, -v_s.points_earned, '적립 취소 · 영수증 ' || v_s.receipt_no, v_me.id);
+    end if;
+  end if;
+  if v_s.coupon_id is not null then
+    update coupons set used_count = greatest(0, used_count - 1) where id = v_s.coupon_id;
+  end if;
   for v_i in select * from sale_items where sale_id = p_sale_id and status = 'sold' and product_id is not null loop
     update products set status = 'available', sold_at = null, sold_by = null, sold_store_id = null,
            sold_price = null, sold_payment = null, sale_id = null, updated_at = now()
@@ -597,6 +688,126 @@ begin
    where id = p_id;
   insert into product_events (product_id, action, detail, user_id, store_id)
   values (p_id, 'unsold', trim(coalesce(p_reason, '')), v_me.id, v_p.store_id);
+end $$;
+
+-- ---------- 회원 ----------
+-- 등록/수정: 직원 누구나 (계산대에서 바로 가입). 전화번호는 숫자만 저장
+create or replace function public.save_member(p_id bigint, p_name text, p_phone text, p_memo text default '')
+returns bigint
+language plpgsql security definer set search_path = public as $$
+declare
+  v_me    profiles := current_profile();
+  v_phone text := regexp_replace(coalesce(p_phone, ''), '[^0-9]', '', 'g');
+  v_id    bigint;
+begin
+  if length(v_phone) < 9 or length(v_phone) > 12 then raise exception '전화번호를 정확히 입력하세요'; end if;
+  if exists (select 1 from members where phone = v_phone and id is distinct from p_id) then
+    raise exception '이미 등록된 전화번호입니다';
+  end if;
+  if p_id is null then
+    insert into members (name, phone, memo, created_by) values (trim(coalesce(p_name, '')), v_phone, trim(coalesce(p_memo, '')), v_me.id)
+    returning id into v_id;
+  else
+    if v_me.role = 'cashier' then raise exception '캐셔 계정은 회원 정보를 수정할 수 없습니다'; end if;
+    update members set name = trim(coalesce(p_name, '')), phone = v_phone, memo = trim(coalesce(p_memo, '')) where id = p_id
+    returning id into v_id;
+    if v_id is null then raise exception '회원을 찾을 수 없습니다'; end if;
+  end if;
+  return v_id;
+end $$;
+
+-- 포인트 직접 조정 (관리자/실장)
+create or replace function public.adjust_points(p_member_id bigint, p_delta integer, p_reason text)
+returns integer
+language plpgsql security definer set search_path = public as $$
+declare
+  v_me profiles := current_profile();
+  v_m  members;
+begin
+  if v_me.role not in ('admin', 'super', 'manager') then raise exception '관리자/실장만 포인트를 조정할 수 있습니다'; end if;
+  if coalesce(p_delta, 0) = 0 then raise exception '조정할 포인트를 입력하세요'; end if;
+  if nullif(trim(coalesce(p_reason, '')), '') is null then raise exception '조정 사유를 입력하세요'; end if;
+  select * into v_m from members where id = p_member_id for update;
+  if not found then raise exception '회원을 찾을 수 없습니다'; end if;
+  if v_m.points + p_delta < 0 then raise exception '포인트가 0보다 작아질 수 없습니다'; end if;
+  update members set points = points + p_delta where id = p_member_id;
+  insert into point_ledger (member_id, delta, reason, user_id) values (p_member_id, p_delta, '조정 · ' || trim(p_reason), v_me.id);
+  return v_m.points + p_delta;
+end $$;
+
+-- 회원 삭제 (관리자). 구매 기록은 남고 회원 연결만 끊김
+create or replace function public.delete_member(p_member_id bigint)
+returns void
+language plpgsql security definer set search_path = public as $$
+declare v_me profiles := current_profile();
+begin
+  if v_me.role not in ('admin', 'super') then raise exception '관리자만 회원을 삭제할 수 있습니다'; end if;
+  update sales set member_id = null where member_id = p_member_id;
+  delete from members where id = p_member_id;
+end $$;
+
+-- ---------- 쿠폰 ----------
+create or replace function public.save_coupon(
+  p_id bigint, p_code text, p_name text, p_kind text, p_value integer, p_min_total integer default 0,
+  p_starts_on date default null, p_ends_on date default null, p_max_uses integer default null, p_active boolean default true
+) returns bigint
+language plpgsql security definer set search_path = public as $$
+declare
+  v_me   profiles := current_profile();
+  v_code text := upper(regexp_replace(coalesce(p_code, ''), '\s', '', 'g'));
+  v_id   bigint;
+begin
+  if v_me.role not in ('admin', 'super') then raise exception '관리자만 쿠폰을 관리할 수 있습니다'; end if;
+  if v_code = '' then raise exception '쿠폰 코드를 입력하세요'; end if;
+  if nullif(trim(coalesce(p_name, '')), '') is null then raise exception '쿠폰 이름을 입력하세요'; end if;
+  if p_kind not in ('amount', 'percent') then raise exception '할인 방식을 선택하세요'; end if;
+  if coalesce(p_value, 0) <= 0 or (p_kind = 'percent' and p_value > 100) then raise exception '할인 값이 올바르지 않습니다'; end if;
+  if p_starts_on is not null and p_ends_on is not null and p_ends_on < p_starts_on then raise exception '기간이 올바르지 않습니다'; end if;
+  if exists (select 1 from coupons where upper(code) = v_code and id is distinct from p_id) then raise exception '이미 있는 쿠폰 코드입니다'; end if;
+  if p_id is null then
+    insert into coupons (code, name, kind, value, min_total, starts_on, ends_on, max_uses, active)
+    values (v_code, trim(p_name), p_kind, p_value, coalesce(p_min_total, 0), p_starts_on, p_ends_on, p_max_uses, coalesce(p_active, true))
+    returning id into v_id;
+  else
+    update coupons set code = v_code, name = trim(p_name), kind = p_kind, value = p_value, min_total = coalesce(p_min_total, 0),
+           starts_on = p_starts_on, ends_on = p_ends_on, max_uses = p_max_uses, active = coalesce(p_active, true)
+     where id = p_id returning id into v_id;
+    if v_id is null then raise exception '쿠폰을 찾을 수 없습니다'; end if;
+  end if;
+  return v_id;
+end $$;
+
+-- 계산대에서 쿠폰 미리 확인 (실제 차감은 checkout 에서 다시 검사)
+create or replace function public.coupon_quote(p_code text, p_amount integer)
+returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare
+  v_me    profiles := current_profile();
+  v_c     coupons;
+  v_today date := (now() at time zone 'Asia/Seoul')::date;
+begin
+  select * into v_c from coupons where upper(code) = upper(trim(coalesce(p_code, '')));
+  if not found then raise exception '없는 쿠폰 코드입니다'; end if;
+  if not v_c.active then raise exception '사용이 중지된 쿠폰입니다'; end if;
+  if v_c.starts_on is not null and v_today < v_c.starts_on then raise exception '아직 사용 기간이 아닌 쿠폰입니다'; end if;
+  if v_c.ends_on is not null and v_today > v_c.ends_on then raise exception '사용 기간이 지난 쿠폰입니다'; end if;
+  if v_c.max_uses is not null and v_c.used_count >= v_c.max_uses then raise exception '사용 횟수가 모두 끝난 쿠폰입니다'; end if;
+  return jsonb_build_object('id', v_c.id, 'code', v_c.code, 'name', v_c.name, 'kind', v_c.kind, 'value', v_c.value, 'min_total', v_c.min_total,
+    'discount', case when coalesce(p_amount, 0) < v_c.min_total then 0
+                     when v_c.kind = 'amount' then least(v_c.value, coalesce(p_amount, 0))
+                     else floor(coalesce(p_amount, 0) * v_c.value / 100.0)::integer end);
+end $$;
+
+-- 포인트 설정 (관리자)
+create or replace function public.set_point_settings(p_enabled boolean, p_rate numeric, p_min_use integer)
+returns void
+language plpgsql security definer set search_path = public as $$
+declare v_me profiles := current_profile();
+begin
+  if v_me.role not in ('admin', 'super') then raise exception '관리자만 포인트 설정을 바꿀 수 있습니다'; end if;
+  if p_rate is null or p_rate < 0 or p_rate > 100 then raise exception '적립률은 0~100%% 사이로 입력하세요'; end if;
+  if p_min_use is null or p_min_use < 0 then raise exception '최소 사용 포인트가 올바르지 않습니다'; end if;
+  update app_settings set points_enabled = coalesce(p_enabled, true), point_rate = p_rate, point_min_use = p_min_use, updated_at = now() where id = 1;
 end $$;
 
 -- ---------- 부분환불 (준비: 화면 없음, 관리자/실장용) ----------
@@ -762,6 +973,22 @@ begin
   return v_prefix || lpad(n::text, 3, '0');
 end $$;
 
+-- ---------- 계정에 남은 기록이 있는지 (계정 삭제 Edge Function 전용) ----------
+create or replace function public.profile_in_use(p_id uuid) returns boolean
+language sql stable security definer set search_path = public as $$
+  select exists (select 1 from products where created_by = p_id or sold_by = p_id)
+      or exists (select 1 from product_events where user_id = p_id)
+      or exists (select 1 from sales where created_by = p_id or cancelled_by = p_id)
+      or exists (select 1 from cash_sessions where opened_by = p_id or closed_by = p_id)
+      or exists (select 1 from cash_moves where user_id = p_id)
+      or exists (select 1 from license where updated_by = p_id)
+      or exists (select 1 from license_events where user_id = p_id)
+      or exists (select 1 from members where created_by = p_id)
+      or exists (select 1 from point_ledger where user_id = p_id);
+$$;
+revoke execute on function public.profile_in_use(uuid) from public, anon, authenticated;
+grant execute on function public.profile_in_use(uuid) to service_role;
+
 -- ---------- 최초 관리자 설정 (관리자가 한 명도 없을 때만 동작) ----------
 create or replace function public.needs_setup() returns boolean
 language sql stable security definer set search_path = public as $$
@@ -855,7 +1082,13 @@ grant execute on function public.extend_license(int, text) to authenticated;
 revoke execute on function public.create_product(text, text, integer, text, bigint, text, text) from public, anon;
 revoke execute on function public.update_product(bigint, text, text, integer, text, bigint, text, text) from public, anon;
 revoke execute on function public.sell_product(bigint, integer, text) from public, anon;
-revoke execute on function public.checkout(jsonb, integer, text, integer, text, jsonb) from public, anon;
+revoke execute on function public.checkout(jsonb, integer, text, integer, text, jsonb, bigint, integer, text) from public, anon;
+revoke execute on function public.save_member(bigint, text, text, text) from public, anon;
+revoke execute on function public.adjust_points(bigint, integer, text) from public, anon;
+revoke execute on function public.delete_member(bigint) from public, anon;
+revoke execute on function public.save_coupon(bigint, text, text, text, integer, integer, date, date, integer, boolean) from public, anon;
+revoke execute on function public.coupon_quote(text, integer) from public, anon;
+revoke execute on function public.set_point_settings(boolean, numeric, integer) from public, anon;
 revoke execute on function public.cancel_sale(bigint, text) from public, anon;
 revoke execute on function public.refund_sale_items(bigint, bigint[], text) from public, anon;
 revoke execute on function public.cash_expected(bigint) from public, anon;
@@ -870,7 +1103,13 @@ revoke execute on function public.store_summary() from public, anon;
 grant execute on function public.create_product(text, text, integer, text, bigint, text, text) to authenticated;
 grant execute on function public.update_product(bigint, text, text, integer, text, bigint, text, text) to authenticated;
 grant execute on function public.sell_product(bigint, integer, text) to authenticated;
-grant execute on function public.checkout(jsonb, integer, text, integer, text, jsonb) to authenticated;
+grant execute on function public.checkout(jsonb, integer, text, integer, text, jsonb, bigint, integer, text) to authenticated;
+grant execute on function public.save_member(bigint, text, text, text) to authenticated;
+grant execute on function public.adjust_points(bigint, integer, text) to authenticated;
+grant execute on function public.delete_member(bigint) to authenticated;
+grant execute on function public.save_coupon(bigint, text, text, text, integer, integer, date, date, integer, boolean) to authenticated;
+grant execute on function public.coupon_quote(text, integer) to authenticated;
+grant execute on function public.set_point_settings(boolean, numeric, integer) to authenticated;
 grant execute on function public.cancel_sale(bigint, text) to authenticated;
 grant execute on function public.refund_sale_items(bigint, bigint[], text) to authenticated;
 grant execute on function public.cash_expected(bigint) to authenticated;

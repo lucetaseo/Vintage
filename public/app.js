@@ -218,7 +218,7 @@
     state.storeMap = Object.fromEntries(state.stores.map((s) => [s.id, s]));
   }
   async function loadPeople() {
-    const { data } = await sb.from('profiles').select('id, username, name, role, store_id, active');
+    const { data } = await sb.from('profiles').select('id, username, name, role, store_id, active, deleted_at');
     state.people = Object.fromEntries((data || []).map((p) => [p.id, p]));
   }
 
@@ -383,6 +383,7 @@
           ${isCashier() ? '' : link('#/', 'list', '상품목록')}
           ${link('#/sell', 'sell', '상품 판매')}
           ${link('#/settle', 'settle', '정산')}
+          ${isCashier() ? '' : link('#/members', 'members', '회원')}
           ${isAdmin() ? link('#/admin', 'admin', '관리자') : ''}
           ${isSuper() ? link('#/license', 'license', '이용관리') : ''}
           ${link('#/account', 'account', '내정보')}
@@ -492,10 +493,15 @@
     };
   }
 
+  async function loadSettings() {
+    const { data } = await sb.from('app_settings').select('*').eq('id', 1).maybeSingle();
+    state.settings = data || { points_enabled: true, point_rate: 1, point_min_use: 1000 };
+  }
+
   async function afterLogin() {
     await loadLicense();
     if (licenseBlocked()) return renderExpired();
-    await Promise.all([loadStores(), loadPeople()]);
+    await Promise.all([loadStores(), loadPeople(), loadSettings()]);
     startRealtime();
     route();
   }
@@ -891,7 +897,7 @@
     state.view = 'admin';
     if (!isAdmin()) return shell('admin', `<div class="empty">관리자만 볼 수 있습니다</div>`);
     await Promise.all([loadStores(), loadPeople()]);
-    const users = Object.values(state.people).sort(
+    const users = Object.values(state.people).filter((u) => !u.deleted_at).sort(
       (a, b) => {
         const order = { super: 0, admin: 1, manager: 2, cashier: 3 };
         return order[a.role] - order[b.role] || a.username.localeCompare(b.username);
@@ -933,6 +939,8 @@
         <button class="btn primary">계정 만들기</button>
       </form>
 
+      <div id="adminPromo"></div>
+
       <h2>매장</h2>
       <div class="card">
         ${state.stores
@@ -973,6 +981,7 @@
       (b) =>
         (b.onclick = () => editStore(Number(b.dataset.rename)))
     );
+    renderAdminPromo();
     $('#addStore').onclick = async () => {
       const name = await promptBox('매장 추가', '매장 이름', `${state.stores.length + 1}호점`);
       if (!name || !name.trim()) return;
@@ -980,6 +989,262 @@
       if (error) return toast(/duplicate/i.test(error.message) ? '이미 있는 매장 이름입니다' : errText(error), 'error');
       viewAdmin();
     };
+  }
+
+  // ---------------- 관리자: 포인트 설정 · 쿠폰 ----------------
+  async function renderAdminPromo() {
+    const box = $('#adminPromo');
+    if (!box) return;
+    await loadSettings();
+    const st = state.settings;
+    const { data: coupons } = await sb.from('coupons').select('*').order('created_at', { ascending: false });
+    const today = kstToday();
+    const couponState = (c) =>
+      !c.active
+        ? '중지'
+        : c.ends_on && today > c.ends_on
+          ? '기간 끝'
+          : c.starts_on && today < c.starts_on
+            ? '시작 전'
+            : c.max_uses != null && c.used_count >= c.max_uses
+              ? '소진'
+              : '사용 가능';
+    box.innerHTML = `
+      <h2>포인트 설정</h2>
+      <div class="card form">
+        <label style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" id="psOn" ${st.points_enabled ? 'checked' : ''}> 포인트 사용 (회원 적립·사용)</label>
+        <div class="row">
+          <label class="field"><span>적립률 (결제금액의 %)</span><input type="text" inputmode="decimal" id="psRate" value="${Number(st.point_rate)}"></label>
+          <label class="field"><span>최소 사용 포인트</span><input type="text" inputmode="numeric" id="psMin" value="${st.point_min_use}"></label>
+        </div>
+        <p class="hint" style="margin-top:0">1P = 1원. 쿠폰·할인을 뺀 실제 결제 금액 기준으로 적립됩니다. 영수증을 취소하면 적립은 회수되고 사용한 포인트는 돌려줍니다.</p>
+        <button class="btn" id="psSave">저장</button>
+      </div>
+
+      <div class="row" style="margin:22px 0 10px"><h2 style="margin:0">쿠폰</h2><span></span><button class="btn small primary" id="cpNew">+ 새 쿠폰</button></div>
+      ${
+        (coupons || []).length
+          ? `<div class="table-wrap"><table>
+          <tr><th>코드</th><th>이름</th><th>할인</th><th>최소 결제</th><th>기간</th><th>사용</th><th>상태</th><th></th></tr>
+          ${coupons
+            .map(
+              (c) => `<tr class="${couponState(c) === '사용 가능' ? '' : 'muted'}"><td><b>${esc(c.code)}</b></td><td>${esc(c.name)}</td>
+              <td>${c.kind === 'amount' ? won(c.value) : `${c.value}%`}</td><td>${c.min_total ? won(c.min_total) : '-'}</td>
+              <td>${c.starts_on || c.ends_on ? `${c.starts_on ? fmtDate(c.starts_on) : ''} ~ ${c.ends_on ? fmtDate(c.ends_on) : ''}` : '제한 없음'}</td>
+              <td>${c.used_count}${c.max_uses != null ? ` / ${c.max_uses}` : '회'}</td><td>${couponState(c)}</td>
+              <td><button class="btn small" data-cp="${c.id}">수정</button></td></tr>`
+            )
+            .join('')}</table></div>`
+          : '<div class="card hint">아직 쿠폰이 없습니다. [+ 새 쿠폰]으로 만들면 계산대에서 코드를 입력해 쓸 수 있습니다.</div>'
+      }`;
+    $('#psSave').onclick = (e) =>
+      busy(e.target, async () => {
+        const { error } = await sb.rpc('set_point_settings', {
+          p_enabled: $('#psOn').checked,
+          p_rate: Number(String($('#psRate').value).replace(/[^0-9.]/g, '')) || 0,
+          p_min_use: numVal($('#psMin').value) ?? 0,
+        });
+        if (error) return toast(errText(error), 'error');
+        toast('포인트 설정을 저장했습니다');
+        loadSettings();
+      });
+    $('#cpNew').onclick = () => editCoupon(null);
+    box.querySelectorAll('[data-cp]').forEach((b) => (b.onclick = () => editCoupon(coupons.find((c) => c.id === Number(b.dataset.cp)))));
+  }
+
+  function editCoupon(c) {
+    const v = (k, d = '') => esc(c?.[k] ?? d);
+    modal(
+      `<h3>${c ? '쿠폰 수정' : '새 쿠폰'}</h3>
+      <div class="row">
+        <label class="field"><span>쿠폰 코드 *</span><input type="text" name="code" value="${v('code')}" placeholder="예: WELCOME5" autocapitalize="characters"></label>
+        <label class="field"><span>이름 *</span><input type="text" name="name" value="${v('name')}" placeholder="예: 신규가입 5천원"></label>
+      </div>
+      <div class="row">
+        <label class="field"><span>할인 방식</span><select name="kind">
+          <option value="amount" ${c?.kind !== 'percent' ? 'selected' : ''}>정액 (원)</option>
+          <option value="percent" ${c?.kind === 'percent' ? 'selected' : ''}>정률 (%)</option></select></label>
+        <label class="field"><span>할인 값 *</span><input type="text" inputmode="numeric" name="value" value="${v('value')}" placeholder="5000 또는 10"></label>
+      </div>
+      <label class="field"><span>최소 결제 금액 (원)</span><input type="text" inputmode="numeric" name="min_total" value="${v('min_total', 0)}"></label>
+      <div class="row">
+        <label class="field"><span>시작일 (비우면 바로)</span><input type="date" name="starts_on" value="${v('starts_on')}"></label>
+        <label class="field"><span>종료일 (비우면 무기한)</span><input type="date" name="ends_on" value="${v('ends_on')}"></label>
+      </div>
+      <label class="field"><span>최대 사용 횟수 (비우면 무제한)</span><input type="text" inputmode="numeric" name="max_uses" value="${v('max_uses')}"></label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" ${c?.active === false ? '' : 'checked'}> 사용 가능</label>
+      <div class="err" data-err></div>
+      <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>저장</button></div>`,
+      (bg, close) => {
+        const g = (n) => $(`[name=${n}]`, bg);
+        $('[data-x]', bg).onclick = () => close();
+        $('[data-ok]', bg).onclick = (e) =>
+          busy(e.target, async () => {
+            const { error } = await sb.rpc('save_coupon', {
+              p_id: c?.id ?? null,
+              p_code: g('code').value,
+              p_name: g('name').value,
+              p_kind: g('kind').value,
+              p_value: numVal(g('value').value) ?? 0,
+              p_min_total: numVal(g('min_total').value) ?? 0,
+              p_starts_on: g('starts_on').value || null,
+              p_ends_on: g('ends_on').value || null,
+              p_max_uses: numVal(g('max_uses').value),
+              p_active: g('active').checked,
+            });
+            if (error) return ($('[data-err]', bg).textContent = errText(error));
+            close();
+            toast('쿠폰을 저장했습니다');
+            renderAdminPromo();
+          });
+      }
+    );
+  }
+
+  // ---------------- 회원 ----------------
+  async function viewMembers() {
+    state.view = 'members';
+    shell(
+      'members',
+      `<div class="row" style="margin-bottom:12px"><h1 style="margin:0">회원</h1><span></span><button class="btn primary" id="mNew">+ 회원 등록</button></div>
+      <div class="toolbar"><input type="search" class="search" id="mQ" placeholder="전화번호 또는 이름 검색" autocomplete="off"></div>
+      <div id="mList"></div>`
+    );
+    const q = $('#mQ');
+    let t;
+    const load = async () => {
+      const v = q.value.trim();
+      const digits = v.replace(/[^0-9]/g, '');
+      const term = v.replace(/[,()%*\\]/g, ' ').trim();
+      let qb = sb.from('members').select('*').order('created_at', { ascending: false }).limit(200);
+      if (v) qb = digits.length >= 3 ? qb.like('phone', `%${digits}%`) : qb.ilike('name', `%${term}%`);
+      const { data, error } = await qb;
+      if (state.view !== 'members') return;
+      if (error) return toast(errText(error), 'error');
+      $('#mList').innerHTML = (data || []).length
+        ? `<div class="table-wrap"><table><tr><th>이름</th><th>전화번호</th><th>포인트</th><th>가입일</th><th>메모</th></tr>
+          ${data
+            .map(
+              (m) => `<tr class="click" data-m="${m.id}"><td><b>${esc(m.name || '-')}</b></td><td>${esc(fmtPhone(m.phone))}</td>
+              <td>${Number(m.points).toLocaleString('ko-KR')}P</td><td>${fmtDate(String(m.created_at).slice(0, 10))}</td>
+              <td style="white-space:normal">${esc(m.memo)}</td></tr>`
+            )
+            .join('')}</table></div>${data.length === 200 ? '<p class="hint">최근 200명까지 표시됩니다. 검색으로 찾아보세요.</p>' : ''}`
+        : '<div class="empty">회원이 없습니다</div>';
+      root.querySelectorAll('[data-m]').forEach((r) => (r.onclick = () => memberDetail(Number(r.dataset.m), load)));
+    };
+    q.oninput = () => {
+      clearTimeout(t);
+      t = setTimeout(load, 300);
+    };
+    $('#mNew').onclick = () => memberEdit(null, load);
+    load();
+  }
+
+  function memberEdit(m, after) {
+    modal(
+      `<h3>${m ? '회원 정보 수정' : '회원 등록'}</h3>
+      <label class="field"><span>전화번호 *</span><input type="text" inputmode="tel" name="phone" value="${esc(m ? fmtPhone(m.phone) : '')}" placeholder="010-0000-0000"></label>
+      <label class="field"><span>이름</span><input type="text" name="name" value="${esc(m?.name || '')}"></label>
+      <label class="field"><span>메모 (선호 스타일, 사이즈 등)</span><textarea name="memo">${esc(m?.memo || '')}</textarea></label>
+      <div class="err" data-err></div>
+      <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>저장</button></div>`,
+      (bg, close) => {
+        const g = (n) => $(`[name=${n}]`, bg);
+        $('[data-x]', bg).onclick = () => close();
+        $('[data-ok]', bg).onclick = (e) =>
+          busy(e.target, async () => {
+            const { error } = await sb.rpc('save_member', { p_id: m?.id ?? null, p_name: g('name').value, p_phone: g('phone').value, p_memo: g('memo').value });
+            if (error) return ($('[data-err]', bg).textContent = errText(error));
+            close();
+            toast('저장했습니다');
+            after?.();
+          });
+      }
+    );
+  }
+
+  async function memberDetail(id, after) {
+    const [{ data: m }, { data: ledger }, { data: sales }] = await Promise.all([
+      sb.from('members').select('*').eq('id', id).maybeSingle(),
+      sb.from('point_ledger').select('*').eq('member_id', id).order('created_at', { ascending: false }).limit(100),
+      sb.from('sales').select('id, receipt_no, created_at, total, status, store_id, item_count').eq('member_id', id).order('created_at', { ascending: false }).limit(100),
+    ]);
+    if (!m) return toast('회원을 찾을 수 없습니다', 'error');
+    const canEdit = !isCashier();
+    modal(
+      `<h3>${esc(m.name || '이름없음')} <small class="hint">${esc(fmtPhone(m.phone))}</small></h3>
+      <div class="cash-total"><span>보유 포인트</span><b>${Number(m.points).toLocaleString('ko-KR')}P</b></div>
+      ${m.memo ? `<p style="white-space:pre-wrap">${esc(m.memo)}</p>` : ''}
+      <div class="row" style="flex-wrap:wrap">
+        ${canEdit ? '<button class="btn small" data-edit>정보 수정</button><button class="btn small" data-adj>포인트 조정</button>' : ''}
+        ${isAdmin() ? '<button class="btn small danger" data-del>회원 삭제</button>' : ''}<span></span>
+      </div>
+      <h2>구매 내역</h2>
+      ${
+        (sales || []).length
+          ? `<div class="mp-list">${sales
+              .map(
+                (r) => `<button class="mp-row ${r.status}" data-sale="${r.id}"><span>${fmt(r.created_at)}</span><span>${esc(storeName(r.store_id))} · ${r.item_count}점</span>
+                <span class="pts">${won(r.total)}${r.status === 'cancelled' ? ' (취소)' : ''}</span></button>`
+              )
+              .join('')}</div>`
+          : '<p class="hint">구매 내역이 없습니다</p>'
+      }
+      <h2>포인트 내역</h2>
+      ${
+        (ledger || []).length
+          ? `<div class="mp-list">${ledger
+              .map(
+                (l) => `<div class="mp-row static"><span>${fmt(l.created_at)}</span><span>${esc(l.reason)}</span>
+                <span class="pts ${l.delta < 0 ? 'neg' : ''}">${l.delta > 0 ? '+' : ''}${Number(l.delta).toLocaleString('ko-KR')}P</span></div>`
+              )
+              .join('')}</div>`
+          : '<p class="hint">포인트 내역이 없습니다</p>'
+      }
+      <div class="row" style="margin-top:12px"><button class="btn" data-x>닫기</button></div>`,
+      (bg, close) => {
+        $('[data-x]', bg).onclick = () => close();
+        bg.querySelectorAll('[data-sale]').forEach(
+          (b) =>
+            (b.onclick = () => {
+              close();
+              openReceipt(Number(b.dataset.sale), after);
+            })
+        );
+        const ed = $('[data-edit]', bg);
+        if (ed)
+          ed.onclick = () => {
+            close();
+            memberEdit(m, after);
+          };
+        const adj = $('[data-adj]', bg);
+        if (adj)
+          adj.onclick = async () => {
+            close();
+            const v = await promptBox('포인트 조정', '더할 포인트 (빼려면 -1000 처럼 입력)', '', '다음');
+            if (v === null) return;
+            const delta = Number(String(v).replace(/[^0-9-]/g, ''));
+            if (!delta) return toast('포인트를 입력하세요', 'error');
+            const reason = await promptBox('포인트 조정 사유', '사유 (예: 이벤트, 오류 정정)', '', '조정');
+            if (reason === null) return;
+            const { error } = await sb.rpc('adjust_points', { p_member_id: m.id, p_delta: delta, p_reason: reason });
+            if (error) return toast(errText(error), 'error');
+            toast('포인트를 조정했습니다');
+            after?.();
+          };
+        const del = $('[data-del]', bg);
+        if (del)
+          del.onclick = async () => {
+            close();
+            if (!(await confirmBox('회원 삭제', `<b>${esc(m.name || fmtPhone(m.phone))}</b> 회원을 삭제합니다. 포인트도 사라지며 되돌릴 수 없습니다. (구매 영수증은 남습니다)`, '삭제', 'sell'))) return;
+            const { error } = await sb.rpc('delete_member', { p_member_id: m.id });
+            if (error) return toast(errText(error), 'error');
+            toast('회원을 삭제했습니다');
+            after?.();
+          };
+      }
+    );
   }
 
   async function editStore(id) {
@@ -1031,13 +1296,38 @@
         <label class="field"><span>매장</span><select name="store_id" ${!needsStore(u.role) ? 'disabled' : ''}>${storeOpts(u.store_id)}</select></label>
       </div>
       <label class="field"><span>새 비밀번호 (바꿀 때만)</span><input type="text" name="password" placeholder="비워두면 유지"></label>
-      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" ${u.active ? 'checked' : ''}> 사용 가능 (해제 시 로그인 정지)</label>
+      <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" ${u.active ? 'checked' : ''}> 사용 가능 (해제 시 로그인 정지 · 다시 켜면 복구)</label>
       <div class="err" data-err></div>
-      <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>저장</button></div>`,
+      <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>저장</button></div>
+      ${
+        ['manager', 'cashier'].includes(u.role) && u.id !== state.me.id
+          ? `<div class="danger-zone"><button class="btn danger block" data-del>계정 삭제</button>
+             <p class="hint">삭제하면 목록에서 사라지고 다시 로그인할 수 없습니다 (되돌릴 수 없음). 판매·등록 기록의 이름은 남습니다. 같은 아이디는 새로 만들 수 있습니다.</p></div>`
+          : ''
+      }`,
       (bg, close) => {
         const g = (n) => $(`[name=${n}]`, bg);
         g('role').onchange = () => (g('store_id').disabled = !needsStore(g('role').value));
         $('[data-x]', bg).onclick = () => close();
+        const del = $('[data-del]', bg);
+        if (del)
+          del.onclick = async () => {
+            close();
+            const ok = await confirmBox(
+              '계정 삭제',
+              `<p><b>${esc(u.name)}</b> (${esc(u.username)}) 계정을 삭제합니다.</p><p class="hint">되돌릴 수 없습니다. 잠깐 쉬는 경우라면 삭제 대신 [사용 가능] 체크를 해제하세요.</p>`,
+              '삭제',
+              'sell'
+            );
+            if (!ok) return;
+            try {
+              await invokeAdmin({ action: 'delete', id: u.id });
+              toast(`${u.username} 계정을 삭제했습니다`);
+              viewAdmin();
+            } catch (err) {
+              toast(errText(err), 'error');
+            }
+          };
         $('[data-ok]', bg).onclick = (e) =>
           busy(e.target, async () => {
             try {
@@ -1230,25 +1520,58 @@
   };
 
   // 장바구니 (새로고침해도 유지)
-  const cart = { items: [], discount: 0, paying: false };
+  const cart = { items: [], discount: 0, member: null, coupon: null, points: 0, paying: false };
   const cartKey = () => `cart:${state.me?.id}`;
   function saveCart() {
     try {
-      localStorage.setItem(cartKey(), JSON.stringify({ items: cart.items, discount: cart.discount }));
+      localStorage.setItem(
+        cartKey(),
+        JSON.stringify({ items: cart.items, discount: cart.discount, member: cart.member, coupon: cart.coupon, points: cart.points })
+      );
     } catch {}
+  }
+  function resetCart() {
+    cart.items = [];
+    cart.discount = 0;
+    cart.member = null;
+    cart.coupon = null;
+    cart.points = 0;
   }
   function loadCart() {
     try {
       const v = JSON.parse(localStorage.getItem(cartKey()) || 'null');
+      resetCart();
       cart.items = Array.isArray(v?.items) ? v.items : [];
       cart.discount = Number(v?.discount) || 0;
+      cart.member = v?.member || null;
+      cart.coupon = v?.coupon || null;
+      cart.points = Number(v?.points) || 0;
     } catch {
-      cart.items = [];
-      cart.discount = 0;
+      resetCart();
     }
   }
   const cartSubtotal = () => cart.items.reduce((a, c) => a + (Number(c.sell) || 0), 0);
-  const cartTotal = () => Math.max(0, cartSubtotal() - (Number(cart.discount) || 0));
+  const afterDiscount = () => Math.max(0, cartSubtotal() - (Number(cart.discount) || 0));
+  const couponDiscount = () => {
+    const c = cart.coupon;
+    const base = afterDiscount();
+    if (!c || base < (c.min_total || 0)) return 0;
+    return c.kind === 'amount' ? Math.min(c.value, base) : Math.floor((base * Math.min(c.value, 100)) / 100);
+  };
+  const cartTotal = () => Math.max(0, afterDiscount() - couponDiscount() - (Number(cart.points) || 0));
+  const pointsEarnPreview = () => {
+    const st = state.settings;
+    if (!cart.member || !st || !st.points_enabled) return 0;
+    return Math.floor((cartTotal() * Number(st.point_rate)) / 100);
+  };
+  const maskPhone = (p) => {
+    const d = String(p || '');
+    return d.length >= 10 ? `${d.slice(0, 3)}-****-${d.slice(-4)}` : d;
+  };
+  const fmtPhone = (p) => {
+    const d = String(p || '');
+    return d.length === 11 ? `${d.slice(0, 3)}-${d.slice(3, 7)}-${d.slice(7)}` : d.length === 10 ? `${d.slice(0, 3)}-${d.slice(3, 6)}-${d.slice(6)}` : d;
+  };
 
   // 결제수단 + 가격 선택 창 (상품 상세 화면에서 1개 판매할 때)
   function sellDialog(p) {
@@ -1477,7 +1800,9 @@
       <div class="cart-sum">
         <div><span>상품 ${cart.items.length}개 합계</span><b id="cSub">${won(cartSubtotal())}</b></div>
         <div><span>추가 할인 (원)</span><input type="text" inputmode="numeric" id="cDisc" value="${cart.discount || ''}" placeholder="0"></div>
+        ${cartExtrasHtml()}
         <div class="cart-total"><span>결제 금액</span><b id="cTotal">${won(cartTotal())}</b></div>
+        <div class="earn hint" id="cEarn">${cart.member && pointsEarnPreview() ? `적립 예정 ${pointsEarnPreview().toLocaleString('ko-KR')}P` : ''}</div>
       </div>
       <div class="paybtns big">${Object.entries(PAY_LABEL)
         .map(([k, v]) => `<button class="btn sell" data-pay="${k}" ${blocked ? 'disabled' : ''}>${v}</button>`)
@@ -1486,7 +1811,11 @@
     </div>${receiptOptionsHtml()}`;
     const updateSums = () => {
       $('#cSub').textContent = won(cartSubtotal());
+      const cd = $('#cCouponAmt');
+      if (cd) cd.textContent = cart.coupon ? (couponDiscount() ? `-${won(couponDiscount())}` : `최소 ${won(cart.coupon.min_total)} 이상`) : '';
       $('#cTotal').textContent = won(cartTotal());
+      const ce = $('#cEarn');
+      if (ce) ce.textContent = cart.member && pointsEarnPreview() ? `적립 예정 ${pointsEarnPreview().toLocaleString('ko-KR')}P` : '';
       saveCart();
     };
     el.querySelectorAll('[data-price]').forEach(
@@ -1500,7 +1829,7 @@
       (b) =>
         (b.onclick = () => {
           cart.items.splice(Number(b.dataset.del), 1);
-          if (!cart.items.length) cart.discount = 0;
+          if (!cart.items.length) resetCart();
           saveCart();
           renderCart();
           focusScanInput();
@@ -1511,16 +1840,153 @@
       updateSums();
     };
     $('#cClear').onclick = async () => {
-      if (!(await confirmBox('장바구니 비우기', '담은 상품을 모두 뺄까요?', '비우기'))) return;
-      cart.items = [];
-      cart.discount = 0;
+      if (!(await confirmBox('장바구니 비우기', '담은 상품과 회원·쿠폰 선택을 모두 비울까요?', '비우기'))) return;
+      resetCart();
       saveCart();
       renderCart();
       scanMsg('', '');
       focusScanInput();
     };
     el.querySelectorAll('[data-pay]').forEach((b) => (b.onclick = () => pay(b.dataset.pay)));
+    bindCartExtras(updateSums);
     bindReceiptOptions();
+  }
+
+  // ----- 장바구니: 회원 · 포인트 · 쿠폰 -----
+  function cartExtrasHtml() {
+    const m = cart.member;
+    const st = state.settings || {};
+    return `
+      <div class="cart-extra"><span>회원</span>${
+        m
+          ? `<span class="member-chip"><b>${esc(m.name || '이름없음')}</b> ${esc(maskPhone(m.phone))} · ${Number(m.points).toLocaleString('ko-KR')}P
+             <button class="btn small" id="cMemberX" title="회원 빼기">✕</button></span>`
+          : `<button class="btn small" id="cMember">회원 찾기 / 가입</button>`
+      }</div>
+      ${
+        m && st.points_enabled
+          ? `<div class="cart-extra"><span>포인트 사용 <small class="hint">(${Number(st.point_min_use).toLocaleString('ko-KR')}P부터)</small></span>
+             <span><input type="text" inputmode="numeric" id="cPoints" value="${cart.points || ''}" placeholder="0">
+             <button class="btn small" id="cPointsAll">전액</button></span></div>`
+          : ''
+      }
+      <div class="cart-extra"><span>쿠폰</span>${
+        cart.coupon
+          ? `<span class="member-chip"><b>${esc(cart.coupon.name)}</b> <span id="cCouponAmt">${
+              couponDiscount() ? `-${won(couponDiscount())}` : `최소 ${won(cart.coupon.min_total)} 이상`
+            }</span> <button class="btn small" id="cCouponX" title="쿠폰 빼기">✕</button></span>`
+          : `<span><input type="text" id="cCouponCode" placeholder="쿠폰 코드" autocapitalize="characters"> <button class="btn small" id="cCouponApply">적용</button></span>`
+      }</div>`;
+  }
+
+  function bindCartExtras(updateSums) {
+    const rerender = () => {
+      saveCart();
+      renderCart();
+    };
+    const mb = $('#cMember');
+    if (mb) mb.onclick = () => memberPicker().then((m) => m && ((cart.member = m), rerender()));
+    const mx = $('#cMemberX');
+    if (mx)
+      mx.onclick = () => {
+        cart.member = null;
+        cart.points = 0;
+        rerender();
+      };
+    const pi = $('#cPoints');
+    if (pi)
+      pi.oninput = () => {
+        cart.points = numVal(pi.value) ?? 0;
+        updateSums();
+      };
+    const pa = $('#cPointsAll');
+    if (pa)
+      pa.onclick = () => {
+        cart.points = Math.min(Number(cart.member.points) || 0, Math.max(0, afterDiscount() - couponDiscount()));
+        rerender();
+      };
+    const ca = $('#cCouponApply');
+    if (ca)
+      ca.onclick = () =>
+        busy(ca, async () => {
+          const code = $('#cCouponCode').value.trim();
+          if (!code) return;
+          const { data, error } = await sb.rpc('coupon_quote', { p_code: code, p_amount: afterDiscount() });
+          if (error) return toast(errText(error), 'error');
+          cart.coupon = { id: data.id, code: data.code, name: data.name, kind: data.kind, value: data.value, min_total: data.min_total };
+          if (afterDiscount() < data.min_total) toast(`이 쿠폰은 ${won(data.min_total)} 이상 결제 시 적용됩니다`);
+          rerender();
+        });
+    const cc = $('#cCouponCode');
+    if (cc) cc.onkeydown = (e) => e.key === 'Enter' && ca.click();
+    const cx = $('#cCouponX');
+    if (cx)
+      cx.onclick = () => {
+        cart.coupon = null;
+        rerender();
+      };
+  }
+
+  // 회원 찾기 / 가입 창 (계산대)
+  function memberPicker() {
+    return modal(
+      `<h3>회원 찾기</h3>
+      <div class="row"><input type="text" id="mpQ" placeholder="전화번호 뒷자리 또는 이름" inputmode="text"><button class="btn primary" id="mpGo">찾기</button></div>
+      <div id="mpList" class="mp-list"></div>
+      <details id="mpNewBox" style="margin-top:12px"><summary><b>+ 새 회원 가입</b></summary>
+        <div style="margin-top:10px">
+          <label class="field"><span>전화번호 *</span><input type="text" inputmode="tel" id="mpPhone" placeholder="010-0000-0000"></label>
+          <label class="field"><span>이름</span><input type="text" id="mpName"></label>
+          <div class="err" data-err></div>
+          <button class="btn primary block" id="mpSave">가입하고 선택</button>
+        </div>
+      </details>
+      <div class="row" style="margin-top:12px"><button class="btn" data-x>닫기</button></div>`,
+      (bg, close) => {
+        const q = $('#mpQ', bg);
+        q.focus();
+        const search = async () => {
+          const v = q.value.trim();
+          const box = $('#mpList', bg);
+          if (!v) return (box.innerHTML = '');
+          const digits = v.replace(/[^0-9]/g, '');
+          const term = v.replace(/[,()%*\\]/g, ' ').trim();
+          let qb = sb.from('members').select('*').order('created_at', { ascending: false }).limit(20);
+          qb = digits.length >= 3 ? qb.like('phone', `%${digits}%`) : qb.ilike('name', `%${term}%`);
+          const { data, error } = await qb;
+          if (error) return (box.innerHTML = `<div class="hint">${esc(errText(error))}</div>`);
+          box.innerHTML = (data || []).length
+            ? data
+                .map(
+                  (m) => `<button class="mp-row" data-id="${m.id}"><b>${esc(m.name || '이름없음')}</b> <span>${esc(fmtPhone(m.phone))}</span>
+                  <span class="pts">${Number(m.points).toLocaleString('ko-KR')}P</span></button>`
+                )
+                .join('')
+            : `<div class="hint" style="padding:10px 0">찾는 회원이 없습니다. 아래에서 새로 가입하세요.</div>`;
+          box.querySelectorAll('[data-id]').forEach((b) => (b.onclick = () => close(data.find((m) => m.id === Number(b.dataset.id)))));
+          if (!(data || []).length && digits.length >= 9) {
+            $('#mpNewBox', bg).open = true;
+            $('#mpPhone', bg).value = digits;
+          }
+        };
+        $('#mpGo', bg).onclick = search;
+        q.onkeydown = (e) => e.key === 'Enter' && search();
+        $('#mpSave', bg).onclick = (e) =>
+          busy(e.target, async () => {
+            const { data: id, error } = await sb.rpc('save_member', {
+              p_id: null,
+              p_name: $('#mpName', bg).value,
+              p_phone: $('#mpPhone', bg).value,
+              p_memo: '',
+            });
+            if (error) return ($('[data-err]', bg).textContent = errText(error));
+            const { data: m } = await sb.from('members').select('*').eq('id', id).maybeSingle();
+            toast('회원으로 가입했습니다');
+            close(m);
+          });
+        $('[data-x]', bg).onclick = () => close(null);
+      }
+    );
   }
 
   // 영수증 옵션 (자동 출력, 용지 폭)
@@ -1598,6 +2064,8 @@
     if (!cart.items.length || cart.paying) return;
     const total = cartTotal();
     if ((Number(cart.discount) || 0) > cartSubtotal()) return toast('할인이 상품 합계보다 큽니다', 'error');
+    if (cart.points && cart.points > (Number(cart.member?.points) || 0)) return toast('보유 포인트보다 많이 쓸 수 없습니다', 'error');
+    if (cart.points && cart.points > afterDiscount() - couponDiscount()) return toast('포인트는 결제 금액까지만 쓸 수 있습니다', 'error');
     let received = null;
     if (method === 'cash') {
       received = await cashDialog(total);
@@ -1612,6 +2080,9 @@
       p_payment: method,
       p_received_cash: received,
       p_memo: '',
+      p_member_id: cart.member?.id ?? null,
+      p_points_used: Number(cart.points) || 0,
+      p_coupon_code: cart.coupon && couponDiscount() > 0 ? cart.coupon.code : null,
     });
     cart.paying = false;
     if (error) {
@@ -1619,15 +2090,17 @@
       toast(errText(error), 'error');
       return focusScanInput();
     }
-    cart.items = [];
-    cart.discount = 0;
+    const memberName = cart.member?.name;
+    resetCart();
     saveCart();
     renderCart();
     scanMsg(
       'done',
       `✅ 결제 완료 · <b>${won(data.total)}</b> ${PAY_LABEL[method]}${
         method === 'cash' && data.change ? ` · 거스름돈 <b>${won(data.change)}</b>` : ''
-      }<br><small>영수증 ${esc(data.receipt_no)}</small>
+      }<br><small>영수증 ${esc(data.receipt_no)}${
+        data.points_earned ? ` · ${esc(memberName || '회원')}님 ${Number(data.points_earned).toLocaleString('ko-KR')}P 적립` : ''
+      }</small>
       <div class="row" style="margin-top:8px"><button class="btn small" id="rPrint">🧾 영수증 출력</button><span></span></div>`
     );
     $('#rPrint').onclick = () => printReceipt(data.sale_id);
@@ -1642,11 +2115,15 @@
     const { data: sale, error } = await sb.from('sales').select('*, sale_items(*)').eq('id', saleId).maybeSingle();
     if (error || !sale) throw error || new Error('영수증을 찾을 수 없습니다');
     const { data: st } = await sb.from('stores').select('*').eq('id', sale.store_id).maybeSingle();
+    let member = null;
+    let coupon = null;
+    if (sale.member_id) member = (await sb.from('members').select('*').eq('id', sale.member_id).maybeSingle()).data;
+    if (sale.coupon_id) coupon = (await sb.from('coupons').select('name, code').eq('id', sale.coupon_id).maybeSingle()).data;
     if (!state.people[sale.created_by]) await loadPeople();
-    return { sale, items: (sale.sale_items || []).sort((a, b) => a.id - b.id), store: st || { name: storeName(sale.store_id) } };
+    return { sale, member, coupon, items: (sale.sale_items || []).sort((a, b) => a.id - b.id), store: st || { name: storeName(sale.store_id) } };
   }
 
-  function receiptHtml({ sale, items, store }, widthMm) {
+  function receiptHtml({ sale, items, store, member, coupon }, widthMm) {
     const line = (l, r, cls = '') => `<div class="r-line ${cls}"><span>${l}</span><span>${r}</span></div>`;
     const t = new Date(sale.created_at).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul', hour12: false });
     return `<div class="receipt" style="width:${widthMm - 8}mm">
@@ -1672,10 +2149,19 @@
       <div class="r-hr"></div>
       ${line(`상품 ${sale.item_count}개 합계`, won(sale.subtotal))}
       ${sale.discount ? line('할인', `-${won(sale.discount)}`) : ''}
+      ${sale.coupon_discount ? line(`쿠폰${coupon ? ` (${esc(coupon.name)})` : ''}`, `-${won(sale.coupon_discount)}`) : ''}
+      ${sale.points_used ? line('포인트 사용', `-${won(sale.points_used)}`) : ''}
       ${line('결제 금액', won(sale.total), 'r-total')}
       ${sale.refunded_amount ? line('환불', `-${won(sale.refunded_amount)}`) : ''}
       ${line('결제수단', PAY_LABEL[sale.payment] || '-')}
       ${sale.payment === 'cash' && sale.received_cash != null ? line('받은 금액', won(sale.received_cash)) + line('거스름돈', won(sale.change_cash || 0)) : ''}
+      ${
+        member || sale.member_id
+          ? `<div class="r-hr"></div>${line('회원', member ? `${esc(member.name || '')} ${esc(maskPhone(member.phone))}` : '(삭제된 회원)')}
+             ${sale.points_earned ? line('적립 포인트', `${Number(sale.points_earned).toLocaleString('ko-KR')}P`) : ''}
+             ${member ? line('보유 포인트', `${Number(member.points).toLocaleString('ko-KR')}P`) : ''}`
+          : ''
+      }
       <div class="r-hr"></div>
       <div class="r-foot">${esc(store.receipt_footer || '')}</div>
     </div>`;
@@ -1774,7 +2260,7 @@
 
   // 완료된 영수증 기준 (취소 제외, 부분환불 차감)
   function salesTotals(rows) {
-    const t = { receipts: 0, items: 0, total: 0, discount: 0, cash: 0, card: 0, transfer: 0, none: 0, refunded: 0, cancelled: 0 };
+    const t = { receipts: 0, items: 0, total: 0, discount: 0, coupon: 0, points: 0, cash: 0, card: 0, transfer: 0, none: 0, refunded: 0, cancelled: 0 };
     for (const r of rows) {
       if (r.status !== 'completed') {
         t.cancelled++;
@@ -1785,6 +2271,8 @@
       t.items += (r.sale_items || []).filter((i) => i.status === 'sold').length;
       t.total += net;
       t.discount += r.discount || 0;
+      t.coupon += r.coupon_discount || 0;
+      t.points += r.points_used || 0;
       t.refunded += r.refunded_amount || 0;
       t[r.payment || 'none'] += net;
     }
@@ -1799,6 +2287,8 @@
       <div><span>카드</span><b>${won(t.card)}</b></div>
       <div><span>이체</span><b>${won(t.transfer)}</b></div>
       ${t.discount ? `<div><span>할인 합계</span><b>${won(t.discount)}</b></div>` : ''}
+      ${t.coupon ? `<div><span>쿠폰 할인</span><b>${won(t.coupon)}</b></div>` : ''}
+      ${t.points ? `<div><span>포인트 사용</span><b>${won(t.points)}</b></div>` : ''}
       ${t.refunded ? `<div><span>부분환불</span><b>${won(t.refunded)}</b></div>` : ''}
       ${t.none ? `<div><span>결제수단 미지정</span><b>${won(t.none)}</b></div>` : ''}
       ${t.cancelled ? `<div><span>취소된 영수증</span><b>${t.cancelled}건</b></div>` : ''}
@@ -2471,6 +2961,7 @@
     if ((m = /^p\/(\d+)\/edit$/.exec(h))) return viewForm(Number(m[1]));
     if ((m = /^p\/(\d+)$/.exec(h))) return viewDetail(Number(m[1]));
     if (h === 'admin') return viewAdmin();
+    if (h === 'members') return viewMembers();
     if (h === 'license') return viewLicense();
     return viewList();
   }

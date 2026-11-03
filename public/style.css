@@ -309,3 +309,20 @@ td.pos { color: #2a5a9a; font-weight: 700; }
   .cart-row { grid-template-columns: 40px 1fr 92px auto; gap: 6px; }
   .cart-row img { width: 40px; height: 40px; }
 }
+.danger-zone { margin-top: 16px; padding-top: 14px; border-top: 1px solid var(--line); }
+.danger-zone .hint { margin: 6px 0 0; }
+
+/* 회원 · 쿠폰 */
+.cart-extra { display: flex; justify-content: space-between; align-items: center; gap: 10px; padding: 6px 0; flex-wrap: wrap; }
+.cart-extra input { width: 130px; text-align: right; padding: 8px; }
+#cCouponCode { text-align: left; width: 150px; }
+.member-chip { display: inline-flex; align-items: center; gap: 6px; background: #f1ece5; border-radius: 999px; padding: 3px 4px 3px 12px; font-size: 14px; }
+.earn { text-align: right; min-height: 1em; }
+.mp-list { display: grid; gap: 6px; max-height: 260px; overflow-y: auto; }
+.mp-row { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; text-align: left; border: 1px solid var(--line); background: var(--card); border-radius: 10px; padding: 9px 12px; cursor: pointer; font-size: 14px; }
+.mp-row.static { cursor: default; }
+.mp-row:hover:not(.static) { background: #f4efe8; }
+.mp-row.cancelled { color: var(--muted); text-decoration: line-through; }
+.mp-row .pts { font-weight: 700; }
+.mp-row .pts.neg { color: var(--sold); }
+tr.muted td { color: var(--muted); }

@@ -89,6 +89,7 @@ Deno.serve(async (req) => {
       const { data: cur } = await admin.from('profiles').select('*').eq('id', id).maybeSingle();
       if (!cur) fail(404, '사용자를 찾을 수 없습니다');
       if (cur.role === 'super' && me.role !== 'super') fail(403, '총관리자 계정은 수정할 수 없습니다');
+      if (cur.deleted_at) fail(400, '삭제된 계정입니다');
       const next = {
         name: body.name !== undefined ? String(body.name).trim() : cur.name,
         role: body.role !== undefined ? String(body.role) : cur.role,
@@ -122,6 +123,38 @@ Deno.serve(async (req) => {
         .eq('id', id);
       if (pErr) fail(400, `계정 수정 실패: ${pErr.message}`);
       return json({ ok: true });
+    }
+
+    // 계정 삭제: 실장/캐셔만. 기록이 없으면 완전 삭제, 있으면 로그인 계정만 삭제하고 기록용 이름은 남김
+    if (body.action === 'delete') {
+      const id = String(body.id ?? '');
+      if (id === me.id) fail(400, '본인 계정은 삭제할 수 없습니다');
+      const { data: cur } = await admin.from('profiles').select('*').eq('id', id).maybeSingle();
+      if (!cur || cur.deleted_at) fail(404, '사용자를 찾을 수 없습니다');
+      if (!['manager', 'cashier'].includes(cur.role)) fail(403, '실장/캐셔 계정만 삭제할 수 있습니다');
+
+      const { data: inUse, error: uErr } = await admin.rpc('profile_in_use', { p_id: id });
+      if (uErr) fail(400, `삭제 확인 실패: ${uErr.message}`);
+
+      if (!inUse) {
+        const { error } = await admin.auth.admin.deleteUser(id); // profiles 도 함께 삭제됨
+        if (error) fail(400, `계정 삭제 실패: ${error.message}`);
+        return json({ ok: true, mode: 'deleted' });
+      }
+      // 기록이 있는 계정: 로그인 영구 차단 + 아이디 비우기(재사용 가능) + 목록에서 숨김
+      const suffix = id.slice(0, 8);
+      const { error: aErr } = await admin.auth.admin.updateUserById(id, {
+        email: `deleted-${id}@${domain}`,
+        password: crypto.randomUUID() + crypto.randomUUID(),
+        ban_duration: BAN_FOREVER,
+      });
+      if (aErr) fail(400, `계정 삭제 실패: ${aErr.message}`);
+      const { error: pErr } = await admin
+        .from('profiles')
+        .update({ active: false, deleted_at: new Date().toISOString(), username: `${cur.username}~${suffix}` })
+        .eq('id', id);
+      if (pErr) fail(400, `계정 삭제 실패: ${pErr.message}`);
+      return json({ ok: true, mode: 'archived' });
     }
 
     fail(400, '알 수 없는 요청입니다');
