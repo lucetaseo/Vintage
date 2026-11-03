@@ -345,3 +345,13 @@ tr.muted td { color: var(--muted); }
 .jp-how { font-size: 12pt; }
 .rate-quick { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 6px; }
 .rate-quick .btn { padding: 4px 8px; font-size: 12px; }
+
+.mk-bar { display: flex; gap: 12px; align-items: center; justify-content: space-between; flex-wrap: wrap; background: #eef3fb; border: 1px solid #cfdcf0; border-radius: var(--radius); padding: 12px 14px; margin-bottom: 12px; }
+.mk-bar .hint { margin-top: 4px; max-width: 640px; }
+.mk-actions { display: flex; gap: 6px; flex: none; }
+
+.send-target { display: grid; gap: 8px; margin: 10px 0 12px; }
+.send-target label { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; cursor: pointer; }
+.send-target input { width: 18px; height: 18px; }
+.mc-list { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+.mc-btn { background: #eef3fb; border-color: #cfdcf0; color: #2a5a9a; }

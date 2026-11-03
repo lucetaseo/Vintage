@@ -1032,11 +1032,15 @@
           <tr><th>코드</th><th>이름</th><th>할인</th><th>최소 결제</th><th>기간</th><th>사용</th><th>상태</th><th></th></tr>
           ${coupons
             .map(
-              (c) => `<tr class="${couponState(c) === '사용 가능' ? '' : 'muted'}"><td><b>${esc(c.code)}</b></td><td>${esc(c.name)}</td>
+              (c) => `<tr class="${couponState(c) === '사용 가능' ? '' : 'muted'}"><td><b>${esc(c.code)}</b></td><td>${esc(c.name)}${
+                c.member_only ? ' <span class="pay card">회원전용</span>' : ''
+              }</td>
               <td>${c.kind === 'amount' ? won(c.value) : `${c.value}%`}</td><td>${c.min_total ? won(c.min_total) : '-'}</td>
               <td>${c.starts_on || c.ends_on ? `${c.starts_on ? fmtDate(c.starts_on) : ''} ~ ${c.ends_on ? fmtDate(c.ends_on) : ''}` : '제한 없음'}</td>
               <td>${c.used_count}${c.max_uses != null ? ` / ${c.max_uses}` : '회'}</td><td>${couponState(c)}</td>
-              <td><button class="btn small" data-cp="${c.id}">수정</button></td></tr>`
+              <td style="display:flex;gap:4px"><button class="btn small" data-cp="${c.id}">수정</button>${
+                couponState(c) === '사용 가능' || couponState(c) === '시작 전' ? `<button class="btn small primary" data-send="${c.id}">회원에게 보내기</button>` : ''
+              }</td></tr>`
             )
             .join('')}</table></div>`
           : '<div class="card hint">아직 쿠폰이 없습니다. [+ 새 쿠폰]으로 만들면 계산대에서 코드를 입력해 쓸 수 있습니다.</div>'
@@ -1056,6 +1060,7 @@
     box.querySelectorAll('[data-rate]').forEach((b) => (b.onclick = () => ($('#psRate').value = b.dataset.rate)));
     $('#cpNew').onclick = () => editCoupon(null);
     box.querySelectorAll('[data-cp]').forEach((b) => (b.onclick = () => editCoupon(coupons.find((c) => c.id === Number(b.dataset.cp)))));
+    box.querySelectorAll('[data-send]').forEach((b) => (b.onclick = () => sendCouponDialog(coupons.find((c) => c.id === Number(b.dataset.send)))));
   }
 
   function editCoupon(c) {
@@ -1079,6 +1084,8 @@
       </div>
       <label class="field"><span>최대 사용 횟수 (비우면 무제한)</span><input type="text" inputmode="numeric" name="max_uses" value="${v('max_uses')}"></label>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" ${c?.active === false ? '' : 'checked'}> 사용 가능</label>
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-top:8px"><input type="checkbox" name="member_only" ${c?.member_only ? 'checked' : ''} style="margin-top:3px">
+        <span>회원 전용 (발급받은 회원만 사용)<br><small class="hint">켜면 코드를 입력해도 쓸 수 없고, [회원에게 보내기]로 발급받은 회원만 계산대에서 쓸 수 있습니다. 코드가 퍼져도 남용되지 않습니다.</small></span></label>
       <div class="err" data-err></div>
       <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>저장</button></div>`,
       (bg, close) => {
@@ -1097,6 +1104,7 @@
               p_ends_on: g('ends_on').value || null,
               p_max_uses: numVal(g('max_uses').value),
               p_active: g('active').checked,
+              p_member_only: g('member_only').checked,
             });
             if (error) return ($('[data-err]', bg).textContent = errText(error));
             close();
@@ -1107,23 +1115,210 @@
     );
   }
 
+  // 쿠폰 할인 문구 (예: 5,000원 할인 / 10% 할인)
+  const couponValueText = (c) => (c.kind === 'amount' ? `${won(c.value)} 할인` : `${c.value}% 할인`);
+
+  async function sendCouponDialog(c) {
+    const [{ count: mkCount }, { count: allCount }] = await Promise.all([
+      sb.from('members').select('id', { count: 'exact', head: true }).eq('marketing_agreed', true),
+      sb.from('members').select('id', { count: 'exact', head: true }),
+    ]);
+    const defExp = c.ends_on || shiftDate(kstToday(), 30);
+    modal(
+      `<h3>"${esc(c.name)}" 회원에게 보내기</h3>
+      <p class="hint" style="margin-top:0">회원 계정에 쿠폰이 들어가고, 계산할 때 회원을 선택하면 보유 쿠폰으로 바로 쓸 수 있습니다.</p>
+      <div class="send-target">
+        <label><input type="radio" name="tg" value="marketing" checked> 문자 수신 동의 회원 <b>${Number(mkCount || 0).toLocaleString('ko-KR')}명</b></label>
+        <label><input type="radio" name="tg" value="all"> 전체 회원 <b>${Number(allCount || 0).toLocaleString('ko-KR')}명</b>
+          <small class="hint">(문자 안내는 동의 회원에게만)</small></label>
+      </div>
+      <label class="field"><span>사용 기한 (이 날까지)</span><input type="date" id="scExp" value="${defExp}"></label>
+      <p class="hint">이미 이 쿠폰을 갖고 있고 아직 안 쓴 회원은 건너뜁니다.</p>
+      <div class="err" data-err></div>
+      <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>쿠폰 발급</button></div>`,
+      (bg, close) => {
+        $('[data-x]', bg).onclick = () => close();
+        $('[data-ok]', bg).onclick = (e) =>
+          busy(e.target, async () => {
+            const target = bg.querySelector('[name=tg]:checked').value;
+            const exp = $('#scExp', bg).value || null;
+            const { data, error } = await sb.rpc('issue_coupons', { p_coupon_id: c.id, p_target: target, p_member_ids: null, p_expires_on: exp });
+            if (error) return ($('[data-err]', bg).textContent = errText(error));
+            close();
+            couponMessageDialog(c, data);
+          });
+      }
+    );
+  }
+
+  // 발급 후 안내 문자 만들기 (문자 앱/발송 사이트에 붙여넣기)
+  async function couponMessageDialog(c, result) {
+    const { data: st } = await sb.from('stores').select('name, biz_name, phone').order('id').limit(1).maybeSingle();
+    const shop = st?.biz_name || st?.name || 'VINTAGE';
+    const exp = result?.expires_on ? fmtDate(result.expires_on) : '';
+    const text = [
+      `(광고) [${shop}]`,
+      `${c.name} 쿠폰이 도착했어요!`,
+      `▶ ${couponValueText(c)}${c.min_total ? ` (${won(c.min_total)} 이상 구매 시)` : ''}`,
+      exp ? `▶ 사용 기한: ${exp}까지` : '',
+      `계산할 때 휴대폰 번호를 말씀해 주세요.`,
+      `무료수신거부 ${st?.phone || '(전화번호 입력)'}`,
+    ]
+      .filter(Boolean)
+      .join('\n');
+    modal(
+      `<h3>✅ ${Number(result?.issued || 0).toLocaleString('ko-KR')}명에게 발급했습니다</h3>
+      ${result?.skipped ? `<p class="hint" style="margin-top:0">이미 갖고 있는 ${result.skipped}명은 건너뛰었습니다.</p>` : ''}
+      <label class="field"><span>안내 문자 (고쳐서 쓰셔도 됩니다)</span><textarea id="smsText" style="min-height:170px">${esc(text)}</textarea></label>
+      <p class="hint">광고 문자는 <b>(광고)</b>로 시작하고 <b>무료 수신거부 방법</b>을 넣어야 합니다. 밤 9시~아침 8시 발송은 별도 동의가 필요합니다.</p>
+      <div class="row" style="flex-wrap:wrap">
+        <button class="btn" data-x>닫기</button>
+        <button class="btn" data-copytext>📋 문자 내용 복사</button>
+        <button class="btn primary" data-copynums>📋 받는 번호 복사</button>
+      </div>`,
+      (bg, close) => {
+        $('[data-x]', bg).onclick = () => close();
+        const copy = async (value, okMsg) => {
+          try {
+            await navigator.clipboard.writeText(value);
+            toast(okMsg);
+          } catch {
+            promptBox('복사', '아래 내용을 복사하세요', value, '닫기');
+          }
+        };
+        $('[data-copytext]', bg).onclick = () => copy($('#smsText', bg).value, '문자 내용을 복사했습니다');
+        $('[data-copynums]', bg).onclick = (e) =>
+          busy(e.target, async () => {
+            // 이 쿠폰을 갖고 있는(미사용) 회원 중 문자 수신 동의자만
+            const holders = new Set();
+            for (let from = 0; from < 50000; from += 1000) {
+              const { data } = await sb.from('member_coupons').select('member_id').eq('coupon_id', c.id).eq('status', 'issued').range(from, from + 999);
+              (data || []).forEach((r) => holders.add(r.member_id));
+              if (!data || data.length < 1000) break;
+            }
+            const list = (await fetchAllMembers(true)).filter((m) => holders.has(m.id));
+            await copy(list.map((m) => fmtPhone(m.phone)).join('\n'), `문자 수신 동의 회원 ${list.length}명 번호를 복사했습니다`);
+          });
+      }
+    );
+  }
+
+  // 회원이 가진 사용 가능 쿠폰
+  async function fetchMemberCoupons(memberId) {
+    const { data } = await sb
+      .from('member_coupons')
+      .select('id, expires_on, coupons(id, code, name, kind, value, min_total, active, starts_on)')
+      .eq('member_id', memberId)
+      .eq('status', 'issued')
+      .order('issued_at', { ascending: false });
+    const today = kstToday();
+    return (data || []).filter(
+      (r) => r.coupons && r.coupons.active && (!r.expires_on || r.expires_on >= today) && (!r.coupons.starts_on || r.coupons.starts_on <= today)
+    );
+  }
+
   // ---------------- 회원 ----------------
+  // 회원 전체 가져오기 (문자 수신 동의 목록 내보내기용, 1000명씩 나눠서)
+  async function fetchAllMembers(onlyMarketing) {
+    const all = [];
+    for (let from = 0; from < 50000; from += 1000) {
+      let qb = sb.from('members').select('*').order('created_at', { ascending: true }).range(from, from + 999);
+      if (onlyMarketing) qb = qb.eq('marketing_agreed', true);
+      const { data, error } = await qb;
+      if (error) throw error;
+      all.push(...(data || []));
+      if (!data || data.length < 1000) break;
+    }
+    return all;
+  }
+
+  async function lastPurchases(ids) {
+    const map = {};
+    for (let i = 0; i < ids.length; i += 200) {
+      const { data } = await sb
+        .from('sales')
+        .select('member_id, created_at')
+        .in('member_id', ids.slice(i, i + 200))
+        .eq('status', 'completed')
+        .order('created_at', { ascending: false })
+        .limit(5000);
+      for (const r of data || []) if (!map[r.member_id]) map[r.member_id] = r.created_at;
+    }
+    return map;
+  }
+
   async function viewMembers() {
     state.view = 'members';
+    const f = { marketing: false };
     shell(
       'members',
       `<div class="row" style="margin-bottom:12px"><h1 style="margin:0">회원</h1><span></span><button class="btn primary" id="mNew">+ 회원 등록</button></div>
-      <div class="toolbar"><input type="search" class="search" id="mQ" placeholder="전화번호 또는 이름 검색" autocomplete="off"></div>
+      <div class="toolbar">
+        <input type="search" class="search" id="mQ" placeholder="전화번호 또는 이름 검색" autocomplete="off">
+        <div class="seg" id="mSeg"><button data-f="all" class="active">전체</button><button data-f="mk">📩 문자 수신 동의만</button></div>
+      </div>
+      <div id="mBar"></div>
       <div id="mList"></div>`
     );
     const q = $('#mQ');
     let t;
+    const renderBar = async () => {
+      const bar = $('#mBar');
+      if (!f.marketing) return (bar.innerHTML = '');
+      const { count } = await sb.from('members').select('id', { count: 'exact', head: true }).eq('marketing_agreed', true);
+      if (state.view !== 'members') return;
+      bar.innerHTML = `<div class="mk-bar">
+        <div><b>문자 수신 동의 회원 ${Number(count || 0).toLocaleString('ko-KR')}명</b>
+          <div class="hint">광고 문자는 이 회원들에게만 보내세요. 문자 앞에 <b>(광고)</b>, 끝에 <b>무료 수신거부 방법</b>을 넣어야 하고, 밤 9시~아침 8시 발송은 별도 동의가 필요합니다.</div></div>
+        <div class="mk-actions"><button class="btn small" id="mkCopy">📋 번호 복사</button><button class="btn small" id="mkCsv">엑셀(CSV) 받기</button></div>
+      </div>`;
+      $('#mkCopy').onclick = (e) =>
+        busy(e.target, async () => {
+          const list = await fetchAllMembers(true);
+          const text = list.map((m) => fmtPhone(m.phone)).join('\n');
+          try {
+            await navigator.clipboard.writeText(text);
+            toast(`${list.length}명 번호를 복사했습니다. 문자 발송 사이트에 붙여넣으세요`);
+          } catch {
+            modal(
+              `<h3>번호 ${list.length}개</h3><p class="hint">아래를 전부 선택해서 복사하세요</p><textarea style="min-height:240px">${esc(text)}</textarea>
+               <div class="row"><button class="btn" data-x>닫기</button></div>`,
+              (bg, close) => {
+                $('textarea', bg).select();
+                $('[data-x]', bg).onclick = () => close();
+              }
+            );
+          }
+        });
+      $('#mkCsv').onclick = (e) =>
+        busy(e.target, async () => {
+          const list = await fetchAllMembers(true);
+          const last = await lastPurchases(list.map((m) => m.id));
+          const head = ['이름', '휴대폰', '포인트', '가입일', '가입 경로', '수신 동의일', '마지막 구매일', '메모'];
+          const d = (v) => (v ? new Date(v).toLocaleDateString('ko-KR', { timeZone: 'Asia/Seoul' }) : '');
+          const lines = list.map((m) =>
+            [m.name, fmtPhone(m.phone), m.points, d(m.created_at), m.join_source === 'qr' ? 'QR' : '직원', d(m.marketing_agreed_at), d(last[m.id]), m.memo]
+              .map((v) => `"${String(v ?? '').replace(/"/g, '""')}"`)
+              .join(',')
+          );
+          const blob = new Blob(['﻿' + [head.join(','), ...lines].join('\r\n')], { type: 'text/csv;charset=utf-8' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a');
+          a.href = url;
+          a.download = `members_sms_${kstToday()}.csv`;
+          document.body.appendChild(a);
+          a.click();
+          a.remove();
+          setTimeout(() => URL.revokeObjectURL(url), 10000);
+        });
+    };
     const load = async () => {
       const v = q.value.trim();
       const digits = v.replace(/[^0-9]/g, '');
       const term = v.replace(/[,()%*\\]/g, ' ').trim();
       let qb = sb.from('members').select('*').order('created_at', { ascending: false }).limit(200);
       if (v) qb = digits.length >= 3 ? qb.like('phone', `%${digits}%`) : qb.ilike('name', `%${term}%`);
+      if (f.marketing) qb = qb.eq('marketing_agreed', true);
       const { data, error } = await qb;
       if (state.view !== 'members') return;
       if (error) return toast(errText(error), 'error');
@@ -1133,17 +1328,29 @@
             .map(
               (m) => `<tr class="click" data-m="${m.id}"><td><b>${esc(m.name || '-')}</b></td><td>${esc(fmtPhone(m.phone))}</td>
               <td>${Number(m.points).toLocaleString('ko-KR')}P</td><td>${fmtDate(String(m.created_at).slice(0, 10))}</td>
-              <td>${m.join_source === 'qr' ? '📱 QR' : '직원'}</td><td>${m.marketing_agreed ? '동의' : '-'}</td>
+              <td>${m.join_source === 'qr' ? '📱 QR' : '직원'}</td>
+              <td>${m.marketing_agreed ? `<span class="pay cash">동의</span>${m.marketing_agreed_at ? ` <small class="hint">${fmtDate(String(m.marketing_agreed_at).slice(0, 10))}</small>` : ''}` : '-'}</td>
               <td style="white-space:normal">${esc(m.memo)}</td></tr>`
             )
-            .join('')}</table></div>${data.length === 200 ? '<p class="hint">최근 200명까지 표시됩니다. 검색으로 찾아보세요.</p>' : ''}`
-        : '<div class="empty">회원이 없습니다</div>';
+            .join('')}</table></div>${data.length === 200 ? '<p class="hint">최근 200명까지 표시됩니다. 검색으로 찾아보세요. (번호 복사·엑셀은 전체가 들어갑니다)</p>' : ''}`
+        : `<div class="empty">${f.marketing ? '문자 수신에 동의한 회원이 없습니다' : '회원이 없습니다'}</div>`;
       root.querySelectorAll('[data-m]').forEach((r) => (r.onclick = () => memberDetail(Number(r.dataset.m), load)));
     };
     q.oninput = () => {
       clearTimeout(t);
       t = setTimeout(load, 300);
     };
+    $('#mSeg')
+      .querySelectorAll('button')
+      .forEach(
+        (b) =>
+          (b.onclick = () => {
+            f.marketing = b.dataset.f === 'mk';
+            $('#mSeg').querySelectorAll('button').forEach((x) => x.classList.toggle('active', x === b));
+            renderBar();
+            load();
+          })
+      );
     $('#mNew').onclick = () => memberEdit(null, load);
     load();
   }
@@ -1154,6 +1361,10 @@
       <label class="field"><span>전화번호 *</span><input type="text" inputmode="tel" name="phone" value="${esc(m ? fmtPhone(m.phone) : '')}" placeholder="010-0000-0000"></label>
       <label class="field"><span>이름</span><input type="text" name="name" value="${esc(m?.name || '')}"></label>
       <label class="field"><span>메모 (선호 스타일, 사이즈 등)</span><textarea name="memo">${esc(m?.memo || '')}</textarea></label>
+      <label style="display:flex;gap:8px;align-items:flex-start;margin-bottom:6px"><input type="checkbox" name="marketing" ${m?.marketing_agreed ? 'checked' : ''} style="margin-top:3px">
+        <span>문자(광고) 수신 동의<br><small class="hint">고객에게 직접 동의를 받은 경우에만 체크하세요. 수신 거부 요청이 오면 체크를 해제하세요.${
+          m?.marketing_agreed_at ? ` (동의일 ${fmtDate(String(m.marketing_agreed_at).slice(0, 10))})` : ''
+        }</small></span></label>
       <div class="err" data-err></div>
       <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>저장</button></div>`,
       (bg, close) => {
@@ -1161,7 +1372,13 @@
         $('[data-x]', bg).onclick = () => close();
         $('[data-ok]', bg).onclick = (e) =>
           busy(e.target, async () => {
-            const { error } = await sb.rpc('save_member', { p_id: m?.id ?? null, p_name: g('name').value, p_phone: g('phone').value, p_memo: g('memo').value });
+            const { error } = await sb.rpc('save_member', {
+              p_id: m?.id ?? null,
+              p_name: g('name').value,
+              p_phone: g('phone').value,
+              p_memo: g('memo').value,
+              p_marketing: g('marketing').checked,
+            });
             if (error) return ($('[data-err]', bg).textContent = errText(error));
             close();
             toast('저장했습니다');
@@ -1172,8 +1389,9 @@
   }
 
   async function memberDetail(id, after) {
-    const [{ data: m }, { data: ledger }, { data: sales }] = await Promise.all([
+    const [{ data: m }, { data: ledger }, { data: sales }, { data: mcs }] = await Promise.all([
       sb.from('members').select('*').eq('id', id).maybeSingle(),
+      sb.from('member_coupons').select('id, status, expires_on, issued_at, used_at, coupons(name, kind, value, min_total)').eq('member_id', id).order('issued_at', { ascending: false }).limit(50),
       sb.from('point_ledger').select('*').eq('member_id', id).order('created_at', { ascending: false }).limit(100),
       sb.from('sales').select('id, receipt_no, created_at, total, status, store_id, item_count').eq('member_id', id).order('created_at', { ascending: false }).limit(100),
     ]);
@@ -1187,6 +1405,22 @@
         ${canEdit ? '<button class="btn small" data-edit>정보 수정</button><button class="btn small" data-adj>포인트 조정</button>' : ''}
         ${isAdmin() ? '<button class="btn small danger" data-del>회원 삭제</button>' : ''}<span></span>
       </div>
+      <h2>쿠폰</h2>
+      ${
+        (mcs || []).length
+          ? `<div class="mp-list">${mcs
+              .map((r) => {
+                const expired = r.status === 'issued' && r.expires_on && r.expires_on < kstToday();
+                const label = r.status === 'used' ? '사용함' : r.status === 'revoked' ? '회수됨' : expired ? '기간 지남' : '보유 중';
+                return `<div class="mp-row static ${r.status !== 'issued' || expired ? 'cancelled' : ''}"><span>${esc(r.coupons?.name || '-')}</span>
+                  <span>${r.coupons ? couponValueText(r.coupons) : ''}${r.expires_on ? ` · ~${fmtDate(r.expires_on)}` : ''}</span>
+                  <span class="pts">${label}${
+                    isAdmin() && r.status === 'issued' ? ` <button class="btn small" data-revoke="${r.id}">회수</button>` : ''
+                  }</span></div>`;
+              })
+              .join('')}</div>`
+          : '<p class="hint">받은 쿠폰이 없습니다</p>'
+      }
       <h2>구매 내역</h2>
       ${
         (sales || []).length
@@ -1212,6 +1446,16 @@
       <div class="row" style="margin-top:12px"><button class="btn" data-x>닫기</button></div>`,
       (bg, close) => {
         $('[data-x]', bg).onclick = () => close();
+        bg.querySelectorAll('[data-revoke]').forEach(
+          (b) =>
+            (b.onclick = async () => {
+              const { error } = await sb.rpc('revoke_member_coupon', { p_id: Number(b.dataset.revoke) });
+              if (error) return toast(errText(error), 'error');
+              toast('쿠폰을 회수했습니다');
+              close();
+              memberDetail(id, after);
+            })
+        );
         bg.querySelectorAll('[data-sale]').forEach(
           (b) =>
             (b.onclick = () => {
@@ -1620,6 +1864,7 @@
     cart.member = null;
     cart.coupon = null;
     cart.points = 0;
+    cart.memberCoupons = [];
   }
   function loadCart() {
     try {
@@ -1709,6 +1954,12 @@
   function viewSell() {
     state.view = 'sell';
     loadCart();
+    if (cart.member)
+      fetchMemberCoupons(cart.member.id).then((list) => {
+        cart.memberCoupons = list;
+        if (cart.coupon?.member_coupon_id && !list.some((r) => r.id === cart.coupon.member_coupon_id)) cart.coupon = null;
+        if (state.view === 'sell') renderCart();
+      });
     const me = state.me;
     shell(
       'sell',
@@ -1954,6 +2205,17 @@
              <button class="btn small" id="cPointsAll">전액</button></span></div>`
           : ''
       }
+      ${
+        m && !cart.coupon && (cart.memberCoupons || []).length
+          ? `<div class="cart-extra"><span>보유 쿠폰</span><span class="mc-list">${cart.memberCoupons
+              .map(
+                (r) => `<button class="btn small mc-btn" data-mc="${r.id}">${esc(r.coupons.name)} · ${couponValueText(r.coupons)}${
+                  r.expires_on ? ` <small>~${esc(r.expires_on.slice(5).replace('-', '/'))}</small>` : ''
+                }</button>`
+              )
+              .join('')}</span></div>`
+          : ''
+      }
       <div class="cart-extra"><span>쿠폰</span>${
         cart.coupon
           ? `<span class="member-chip"><b>${esc(cart.coupon.name)}</b> <span id="cCouponAmt">${
@@ -1969,12 +2231,33 @@
       renderCart();
     };
     const mb = $('#cMember');
-    if (mb) mb.onclick = () => memberPicker().then((m) => m && ((cart.member = m), rerender()));
+    if (mb)
+      mb.onclick = () =>
+        memberPicker().then(async (m) => {
+          if (!m) return;
+          cart.member = m;
+          cart.memberCoupons = await fetchMemberCoupons(m.id);
+          rerender();
+          if (cart.memberCoupons.length) toast(`${m.name || '회원'}님 보유 쿠폰 ${cart.memberCoupons.length}장`);
+        });
+    $('#cart')
+      ?.querySelectorAll('[data-mc]')
+      .forEach(
+        (b) =>
+          (b.onclick = () => {
+            const r = cart.memberCoupons.find((x) => x.id === Number(b.dataset.mc));
+            cart.coupon = { ...r.coupons, member_coupon_id: r.id };
+            if (afterDiscount() < (r.coupons.min_total || 0)) toast(`이 쿠폰은 ${won(r.coupons.min_total)} 이상 결제 시 적용됩니다`);
+            rerender();
+          })
+      );
     const mx = $('#cMemberX');
     if (mx)
       mx.onclick = () => {
         cart.member = null;
         cart.points = 0;
+        cart.memberCoupons = [];
+        if (cart.coupon?.member_coupon_id) cart.coupon = null;
         rerender();
       };
     const pi = $('#cPoints');
@@ -2022,6 +2305,7 @@
         <div style="margin-top:10px">
           <label class="field"><span>전화번호 *</span><input type="text" inputmode="tel" id="mpPhone" placeholder="010-0000-0000"></label>
           <label class="field"><span>이름</span><input type="text" id="mpName"></label>
+          <label style="display:flex;gap:8px;align-items:center;margin-bottom:8px;font-size:14px"><input type="checkbox" id="mpMk"> 문자(광고) 수신 동의를 받았어요</label>
           <div class="err" data-err></div>
           <button class="btn primary block" id="mpSave">가입하고 선택</button>
         </div>
@@ -2067,6 +2351,7 @@
               p_name: $('#mpName', bg).value,
               p_phone: $('#mpPhone', bg).value,
               p_memo: '',
+              p_marketing: $('#mpMk', bg).checked,
             });
             if (error) return ($('[data-err]', bg).textContent = errText(error));
             const { data: m } = await sb.from('members').select('*').eq('id', id).maybeSingle();
@@ -2171,7 +2456,8 @@
       p_memo: '',
       p_member_id: cart.member?.id ?? null,
       p_points_used: Number(cart.points) || 0,
-      p_coupon_code: cart.coupon && couponDiscount() > 0 ? cart.coupon.code : null,
+      p_coupon_code: cart.coupon && !cart.coupon.member_coupon_id && couponDiscount() > 0 ? cart.coupon.code : null,
+      p_member_coupon_id: cart.coupon?.member_coupon_id && couponDiscount() > 0 ? cart.coupon.member_coupon_id : null,
     });
     cart.paying = false;
     if (error) {
