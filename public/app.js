@@ -526,6 +526,7 @@
          <div class="seg" id="seg">${seg('available', '판매중')}${seg('sold', '판매완료')}${seg('all', '전체')}</div>
          <a class="btn primary addbtn" href="#/new">+ 상품 등록</a>
          <a class="btn addbtn" href="#/scan">📷 스캔</a>
+         <a class="btn addbtn" href="#/labels">🏷 라벨</a>
        </div>
        <div id="lookup"></div>
        <div class="grid" id="grid"></div>
@@ -673,7 +674,7 @@
             <div class="actions">
               ${manage && !sold ? `<button class="btn sell block" id="sellBtn">판매 처리</button>` : ''}
               ${manage && sold ? `<button class="btn block" id="unsellBtn">판매 취소 (되돌리기)</button>` : ''}
-              <a class="btn" href="#/labels?ids=${p.id}" style="text-align:center;text-decoration:none">🏷 라벨 출력 (QR · 바코드)</a>
+              <a class="btn" href="#/labels?ids=${p.id}" style="text-align:center;text-decoration:none">🏷 라벨 출력 / 저장 (QR · 바코드)</a>
               ${manage ? `<button class="btn" id="editBtn">수정 / 매장 이동</button>` : ''}
               ${isAdmin() ? `<button class="btn danger" id="delBtn">삭제</button>` : ''}
             </div>
@@ -1332,13 +1333,17 @@
       };
   }
 
-  // ---------------- 라벨 출력 (QR + 바코드) ----------------
+  // ---------------- 라벨 출력 (QR 또는 바코드 선택 → 인쇄 / 이미지 저장) ----------------
   const LABEL_SIZES = {
     '50x30': { name: '라벨프린터 50×30mm', w: 50, h: 30 },
     '40x30': { name: '라벨프린터 40×30mm', w: 40, h: 30 },
     '60x40': { name: '라벨프린터 60×40mm', w: 60, h: 40 },
     a4: { name: 'A4 스티커 21칸 (63.5×38.1mm)', w: 63.5, h: 38.1, sheet: { cols: 3, rows: 7, top: 15.15, left: 7.2, pitchX: 66, pitchY: 38.1 } },
   };
+  const LABEL_TYPES = { qr: 'QR코드', barcode: '바코드' };
+  const LABEL_FONT = '"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", Arial, sans-serif';
+  const DPI = 300;
+  const mmPx = (v) => Math.round((v / 25.4) * DPI);
   const pref = (k, v) => {
     try {
       if (v === undefined) return localStorage.getItem(k);
@@ -1347,62 +1352,105 @@
     return null;
   };
 
-  function labelHtml(p, size) {
-    const pad = 1.5;
-    const qrMm = Math.min(size.h * 0.58, size.w * 0.42);
-    const barH = size.h - qrMm - pad * 2 - 1.2;
-    const qr = window.qrcode(0, 'M');
-    qr.addData(p.code);
-    qr.make();
-    const qrSvg = qr.createSvgTag({ cellSize: 2, margin: 2, scalable: true });
-    const bar = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
-    window.JsBarcode(bar, p.code, { format: 'CODE128', displayValue: false, margin: 0, height: 50, width: 2 });
-    const bw = bar.getAttribute('width');
-    const bh = bar.getAttribute('height');
-    bar.setAttribute('viewBox', `0 0 ${parseFloat(bw)} ${parseFloat(bh)}`);
-    bar.setAttribute('preserveAspectRatio', 'none');
-    bar.removeAttribute('width');
-    bar.removeAttribute('height');
-    bar.removeAttribute('style');
-    const fs = Math.max(2.2, Math.min(3.2, size.h / 10));
-    return `<div class="label" style="width:${size.w}mm;height:${size.h}mm;padding:${pad}mm">
-      <div class="label-top" style="height:${qrMm}mm">
-        <div class="label-qr" style="width:${qrMm}mm;height:${qrMm}mm">${qrSvg}</div>
-        <div class="label-text" style="font-size:${fs}mm">
-          <div class="label-code">${esc(p.code)}</div>
-          <div class="label-name">${esc(p.name)}</div>
-          <div class="label-price">${p.price != null ? won(p.price) : ''}</div>
-        </div>
-      </div>
-      <div class="label-bar" style="height:${barH}mm;margin-top:1.2mm;padding:0 ${Math.max(0, 3 - pad)}mm">${bar.outerHTML}</div>
-    </div>`;
+  // 글자가 칸보다 길면 … 으로 줄임
+  function fitText(ctx, text, maxW) {
+    let t = String(text || '');
+    if (ctx.measureText(t).width <= maxW) return t;
+    while (t.length > 1 && ctx.measureText(t + '…').width > maxW) t = t.slice(0, -1);
+    return t + '…';
   }
 
-  function sheetHtml(items, size) {
-    if (!size.sheet) return items.map((p) => `<div class="label-page">${labelHtml(p, size)}</div>`).join('');
-    const sh = size.sheet;
-    const per = sh.cols * sh.rows;
-    let out = '';
-    for (let i = 0; i < items.length; i += per) {
-      out += `<div class="a4-page">${items
-        .slice(i, i + per)
-        .map((p, j) => {
-          const c = j % sh.cols;
-          const r = Math.floor(j / sh.cols);
-          return `<div style="position:absolute;left:${sh.left + c * sh.pitchX}mm;top:${sh.top + r * sh.pitchY}mm">${labelHtml(p, size)}</div>`;
-        })
-        .join('')}</div>`;
+  // 라벨 1장을 300dpi 이미지(canvas)로 그림. 미리보기·인쇄·저장 모두 이 그림을 사용
+  function renderLabel(p, size, type) {
+    const W = mmPx(size.w);
+    const H = mmPx(size.h);
+    const pad = mmPx(1.5);
+    const c = document.createElement('canvas');
+    c.width = W;
+    c.height = H;
+    const ctx = c.getContext('2d');
+    ctx.fillStyle = '#fff';
+    ctx.fillRect(0, 0, W, H);
+    ctx.fillStyle = '#000';
+    ctx.textBaseline = 'top';
+    const nameFont = mmPx(Math.max(2.4, Math.min(3.4, size.h * 0.1)));
+    const subFont = Math.round(nameFont * 0.8);
+    const price = p.price != null ? won(p.price) : '';
+
+    if (type === 'qr') {
+      // QR → 그 밑에 상품명 → 코드 · 가격
+      const textH = Math.round(nameFont * 1.25 + subFont * 1.2);
+      const qr = window.qrcode(0, 'M');
+      qr.addData(p.code);
+      qr.make();
+      const n = qr.getModuleCount() + 4; // 사방 2칸 여백(스캔용)
+      const box = Math.min(H - pad * 2 - textH, W - pad * 2);
+      const cell = Math.max(1, Math.floor(box / n));
+      const qrPx = cell * n;
+      const x0 = Math.round((W - qrPx) / 2);
+      const y0 = pad;
+      for (let r = 0; r < n - 4; r++)
+        for (let col = 0; col < n - 4; col++)
+          if (qr.isDark(r, col)) ctx.fillRect(x0 + (col + 2) * cell, y0 + (r + 2) * cell, cell, cell);
+      ctx.textAlign = 'center';
+      let y = y0 + qrPx;
+      ctx.font = `700 ${nameFont}px ${LABEL_FONT}`;
+      ctx.fillText(fitText(ctx, p.name || p.code, W - pad * 2), W / 2, y);
+      y += Math.round(nameFont * 1.25);
+      ctx.font = `400 ${subFont}px ${LABEL_FONT}`;
+      ctx.fillText(fitText(ctx, [p.code, price].filter(Boolean).join(' · '), W - pad * 2), W / 2, y);
+    } else {
+      // 상품명(+가격) → 그 밑에 바코드 → 코드번호
+      const quiet = Math.max(pad, mmPx(3)); // 바코드 좌우 여백(스캔용)
+      ctx.font = `700 ${nameFont}px ${LABEL_FONT}`;
+      ctx.textAlign = 'left';
+      let priceW = 0;
+      if (price) {
+        priceW = ctx.measureText(price).width + mmPx(1.5);
+        ctx.textAlign = 'right';
+        ctx.fillText(price, W - pad, pad);
+        ctx.textAlign = 'left';
+      }
+      ctx.fillText(fitText(ctx, p.name || '', W - pad * 2 - priceW), pad, pad);
+      const barTop = pad + Math.round(nameFont * 1.35);
+      const barBottom = H - pad - Math.round(subFont * 1.25);
+      const tmp = document.createElement('canvas');
+      window.JsBarcode(tmp, p.code, { format: 'CODE128', displayValue: false, margin: 0, width: 1, height: 10, background: '#fff' });
+      const scale = Math.max(1, Math.floor((W - quiet * 2) / tmp.width)); // 막대 폭을 정수배로 → 선명
+      const bw = tmp.width * scale;
+      ctx.imageSmoothingEnabled = false;
+      ctx.drawImage(tmp, Math.round((W - bw) / 2), barTop, bw, barBottom - barTop);
+      ctx.font = `400 ${subFont}px ${LABEL_FONT}`;
+      ctx.textAlign = 'center';
+      ctx.fillText(p.code, W / 2, barBottom + Math.round(subFont * 0.15));
     }
-    return out;
+    return c;
   }
 
-  function printLabels(items, sizeKey) {
-    const size = LABEL_SIZES[sizeKey];
+  function printLabels(images, size) {
     document.getElementById('printArea')?.remove();
     document.getElementById('printPage')?.remove();
     const area = document.createElement('div');
     area.id = 'printArea';
-    area.innerHTML = sheetHtml(items, size);
+    const img = (src) => `<img src="${src}" style="width:${size.w}mm;height:${size.h}mm;display:block">`;
+    if (!size.sheet) {
+      area.innerHTML = images.map((src) => `<div class="label-page">${img(src)}</div>`).join('');
+    } else {
+      const sh = size.sheet;
+      const per = sh.cols * sh.rows;
+      let out = '';
+      for (let i = 0; i < images.length; i += per) {
+        out += `<div class="a4-page">${images
+          .slice(i, i + per)
+          .map((src, j) => {
+            const left = sh.left + (j % sh.cols) * sh.pitchX;
+            const top = sh.top + Math.floor(j / sh.cols) * sh.pitchY;
+            return `<div style="position:absolute;left:${left}mm;top:${top}mm">${img(src)}</div>`;
+          })
+          .join('')}</div>`;
+      }
+      area.innerHTML = out;
+    }
     document.body.appendChild(area);
     const st = document.createElement('style');
     st.id = 'printPage';
@@ -1414,7 +1462,26 @@
       window.removeEventListener('afterprint', cleanup);
     };
     window.addEventListener('afterprint', cleanup);
-    setTimeout(() => window.print(), 50);
+    // 이미지가 다 준비된 뒤 인쇄
+    Promise.all([...area.querySelectorAll('img')].map((i) => (i.complete ? 0 : new Promise((r) => (i.onload = i.onerror = r))))).then(() =>
+      window.print()
+    );
+  }
+
+  function downloadCanvas(canvas, filename) {
+    return new Promise((resolve) =>
+      canvas.toBlob((blob) => {
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = filename;
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+        setTimeout(() => URL.revokeObjectURL(url), 10000);
+        resolve();
+      }, 'image/png')
+    );
   }
 
   async function viewLabels(ids) {
@@ -1434,22 +1501,29 @@
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const checked = new Set(ids.length ? products.map((p) => p.id) : products.filter((p) => new Date(p.created_at) >= today).map((p) => p.id));
-    let sizeKey = pref('labelSize') || '50x30';
-    if (!LABEL_SIZES[sizeKey]) sizeKey = '50x30';
+    let sizeKey = LABEL_SIZES[pref('labelSize')] ? pref('labelSize') : '50x30';
+    let type = LABEL_TYPES[pref('labelType')] ? pref('labelType') : 'qr';
 
     shell(
       'list',
       `<p><a href="${ids.length === 1 ? `#/p/${ids[0]}` : '#/'}">← 돌아가기</a></p>
       <h1>라벨 출력</h1>
       <div class="card form" style="max-width:none">
+        <label class="field"><span>라벨 종류</span>
+          <div class="seg" id="ltype">${Object.entries(LABEL_TYPES)
+            .map(([k, v]) => `<button type="button" data-type="${k}" class="${k === type ? 'active' : ''}">${v}</button>`)
+            .join('')}</div></label>
         <div class="row">
-          <label class="field"><span>라벨 종류</span><select id="lsize">${Object.entries(LABEL_SIZES)
+          <label class="field"><span>라벨 크기</span><select id="lsize">${Object.entries(LABEL_SIZES)
             .map(([k, v]) => `<option value="${k}" ${k === sizeKey ? 'selected' : ''}>${v.name}</option>`)
             .join('')}</select></label>
-          <label class="field"><span>상품당 장수</span><input type="number" id="lcopies" min="1" max="20" value="1"></label>
+          <label class="field"><span>상품당 장수 (인쇄)</span><input type="number" id="lcopies" min="1" max="20" value="1"></label>
         </div>
-        <button class="btn primary block" id="lprint">🖨 인쇄</button>
-        <p class="hint">라벨 하나에 QR코드와 바코드가 함께 들어갑니다. 인쇄 창에서 <b>여백: 없음</b>, <b>배율: 100%(실제 크기)</b>로 설정하세요.</p>
+        <div class="row">
+          <button class="btn primary" id="lprint">🖨 인쇄</button>
+          <button class="btn" id="lsave">⬇ 이미지로 저장 (PNG)</button>
+        </div>
+        <p class="hint">인쇄 창에서 <b>여백: 없음</b>, <b>배율: 100%(실제 크기)</b>로 설정하세요. 저장한 이미지는 라벨프린터 전용 프로그램에서 불러와 출력할 수도 있습니다. 미리보기의 라벨을 누르면 그 라벨만 저장됩니다.</p>
       </div>
       ${
         ids.length
@@ -1472,14 +1546,35 @@
     );
 
     const selected = () => products.filter((p) => checked.has(p.id));
+    const fileName = (p) => `${p.code}_${type === 'qr' ? 'QR' : 'barcode'}.png`;
     const renderPreview = () => {
       const size = LABEL_SIZES[sizeKey];
-      const list = selected().slice(0, 6);
-      $('#lpreview').innerHTML = list.length
-        ? list.map((p) => labelHtml(p, size)).join('') + (selected().length > 6 ? `<div class="hint">외 ${selected().length - 6}개</div>` : '')
-        : '<div class="hint">선택된 상품이 없습니다</div>';
+      const list = selected();
+      const el = $('#lpreview');
+      if (!list.length) return (el.innerHTML = '<div class="hint">선택된 상품이 없습니다</div>');
+      el.innerHTML = '';
+      list.slice(0, 12).forEach((p) => {
+        const img = document.createElement('img');
+        img.src = renderLabel(p, size, type).toDataURL('image/png');
+        img.className = 'label-img';
+        img.style.width = `${size.w * 1.4}mm`;
+        img.title = `${p.code} - 눌러서 이미지 저장`;
+        img.onclick = () => downloadCanvas(renderLabel(p, size, type), fileName(p));
+        el.appendChild(img);
+      });
+      if (list.length > 12) el.insertAdjacentHTML('beforeend', `<div class="hint">외 ${list.length - 12}개</div>`);
     };
     renderPreview();
+
+    $('#ltype').querySelectorAll('button').forEach(
+      (b) =>
+        (b.onclick = () => {
+          type = b.dataset.type;
+          pref('labelType', type);
+          $('#ltype').querySelectorAll('button').forEach((x) => x.classList.toggle('active', x === b));
+          renderPreview();
+        })
+    );
     $('#lsize').onchange = (e) => {
       sizeKey = e.target.value;
       pref('labelSize', sizeKey);
@@ -1502,11 +1597,24 @@
     };
     if ($('#lall')) $('#lall').onclick = () => setAll(true);
     if ($('#lnone')) $('#lnone').onclick = () => setAll(false);
+
     $('#lprint').onclick = () => {
+      const list = selected();
+      if (!list.length) return toast('출력할 상품을 선택하세요', 'error');
       const copies = Math.min(20, Math.max(1, Number($('#lcopies').value) || 1));
-      const items = selected().flatMap((p) => Array(copies).fill(p));
-      if (!items.length) return toast('출력할 상품을 선택하세요', 'error');
-      printLabels(items, sizeKey);
+      const size = LABEL_SIZES[sizeKey];
+      const images = list.flatMap((p) => Array(copies).fill(renderLabel(p, size, type).toDataURL('image/png')));
+      printLabels(images, size);
+    };
+    $('#lsave').onclick = async () => {
+      const list = selected();
+      if (!list.length) return toast('저장할 상품을 선택하세요', 'error');
+      const size = LABEL_SIZES[sizeKey];
+      if (list.length > 1) toast(`${list.length}개 이미지를 저장합니다. 브라우저가 "여러 파일 다운로드"를 물으면 허용하세요`);
+      for (const p of list) {
+        await downloadCanvas(renderLabel(p, size, type), fileName(p));
+        await new Promise((r) => setTimeout(r, 350));
+      }
     };
   }
 

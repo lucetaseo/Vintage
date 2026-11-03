@@ -174,7 +174,7 @@ tr.inactive td { color: var(--muted); text-decoration: line-through; }
 
 /* 목록 화면 상품등록 버튼: PC는 검색줄 오른쪽, 휴대폰은 검색줄 아래 한 줄 전체 */
 .addbtn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
-@media (max-width: 640px) { .toolbar .addbtn { flex: 1 1 100%; padding: 13px; font-size: 16px; } }
+@media (max-width: 640px) { .toolbar .addbtn { flex: 1 1 30%; padding: 13px 8px; font-size: 15px; } .toolbar .addbtn.primary { flex-basis: 100%; } }
 
 /* scan */
 .scan-wrap { display: grid; gap: 16px; }
@@ -202,15 +202,7 @@ tr.inactive td { color: var(--muted); text-decoration: line-through; }
 .pick img { width: 44px; height: 44px; object-fit: cover; border-radius: 6px; background: #ece5dc; }
 .pick input { width: 20px; height: 20px; flex: none; }
 .label-preview { display: flex; flex-wrap: wrap; gap: 12px; align-items: flex-start; }
-.label-preview .label { box-shadow: 0 0 0 1px var(--line); }
-.label { background: #fff; color: #000; box-sizing: border-box; overflow: hidden; display: flex; flex-direction: column; font-family: Arial, "Apple SD Gothic Neo", "Malgun Gothic", sans-serif; }
-.label-top { display: flex; gap: 1.5mm; }
-.label-qr svg { width: 100%; height: 100%; display: block; }
-.label-text { flex: 1; min-width: 0; line-height: 1.2; display: flex; flex-direction: column; justify-content: center; }
-.label-code { font-weight: 800; word-break: break-all; }
-.label-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .85em; }
-.label-price { font-weight: 800; }
-.label-bar svg { width: 100%; height: 100%; display: block; }
+.label-img { max-width: 100%; height: auto; background: #fff; box-shadow: 0 0 0 1px var(--line), 0 2px 6px rgba(0,0,0,.08); border-radius: 2px; cursor: pointer; }
 #printArea { display: none; }
 @media print {
   body > *:not(#printArea) { display: none !important; }
