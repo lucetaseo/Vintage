@@ -482,3 +482,6 @@ create policy "photos delete orphan" on storage.objects for delete to authentica
 insert into public.stores (name)
 select n from (values ('1호점'), ('2호점'), ('3호점')) as v(n)
 where not exists (select 1 from public.stores);
+
+-- ---------- API 가 새 테이블/함수를 바로 인식하도록 새로고침 ----------
+notify pgrst, 'reload schema';
