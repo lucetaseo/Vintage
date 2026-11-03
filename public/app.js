@@ -406,8 +406,17 @@
 
   // 관리자가 아직 한 명도 없으면 "최초 관리자 만들기" 화면으로 전환
   async function checkSetup() {
-    const { data } = await sb.rpc('needs_setup');
-    if (data === true && state.view === 'login') renderSetup();
+    const { data, error } = await sb.rpc('needs_setup');
+    if (state.view !== 'login') return;
+    if (data === true) return renderSetup();
+    if (error) {
+      const el = $('#loginErr');
+      if (el && !el.textContent) {
+        el.textContent = /function|schema cache|not find|does not exist/i.test(error.message)
+          ? 'DB가 아직 준비되지 않았습니다. Supabase SQL Editor 에서 schema.sql 을 실행하세요'
+          : `서버 연결 확인 실패: ${errText(error)}`;
+      }
+    }
   }
 
   function renderSetup() {
