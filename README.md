@@ -1,5 +1,8 @@
 # VINTAGE 재고관리
 
+**👉 접속 주소: https://vintage.jjurang.workers.dev/**
+(휴대폰·PC에서 열고 "앱 설치" / "홈 화면에 추가"하면 앱처럼 쓸 수 있습니다)
+
 빈티지샵 여러 매장(1·2·3호점…)이 **상품 재고와 판매 상태를 실시간으로 공유**하는 내부 프로그램입니다.
 
 - 실장이 **사진 + 상품코드**로 상품을 등록합니다.
@@ -102,6 +105,7 @@ Vercel, Netlify, Cloudflare Pages 중 하나에서 이 GitHub 저장소를 연�
 - Build command: **없음**
 - Output / Publish directory: **`public`**
 
+현재 배포 주소는 **https://vintage.jjurang.workers.dev/** (Cloudflare Workers) 입니다.
 배포가 끝나면 호스팅 설정의 **Custom Domain** 에서 보유한 도메인을 연결합니다. 예: `stock.내도메인.com`.
 GitHub에 push할 때마다 자동으로 다시 배포됩니다.
 
