@@ -56,7 +56,7 @@ h2 { font-size: 16px; margin: 22px 0 10px; }
 .btn.danger { color: var(--sold); }
 .btn.small { padding: 6px 10px; font-size: 13px; }
 .btn.block { width: 100%; padding: 14px; font-size: 16px; }
-input[type=text], input[type=password], input[type=search], input[type=number], select, textarea {
+input[type=text], input[type=password], input[type=search], input[type=number], input[type=date], select, textarea {
   width: 100%; padding: 11px 12px; border: 1px solid var(--line); border-radius: 10px; background: #fff;
 }
 textarea { min-height: 70px; resize: vertical; }
@@ -161,3 +161,17 @@ tr.inactive td { color: var(--muted); text-decoration: line-through; }
 .toast.sold { background: var(--sold); }
 .toast.error { background: #6b1f17; }
 @keyframes up { from { transform: translateY(10px); opacity: 0; } }
+
+/* license */
+.lic { padding: 10px 16px; font-size: 14px; font-weight: 600; text-align: center; }
+.lic a { text-decoration: underline; }
+.lic.warn { background: #fff3cd; color: #7a5a00; }
+.lic.grace { background: var(--sold); color: #fff; }
+.lic-badge { display: inline-block; padding: 2px 10px; border-radius: 999px; font-size: 13px; font-weight: 700; }
+.lic-badge.ok { background: var(--ok-bg); color: var(--ok); }
+.lic-badge.warning { background: #fff3cd; color: #7a5a00; }
+.lic-badge.grace, .lic-badge.expired { background: var(--sold); color: #fff; }
+
+/* 목록 화면 상품등록 버튼: PC는 검색줄 오른쪽, 휴대폰은 검색줄 아래 한 줄 전체 */
+.addbtn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
+@media (max-width: 640px) { .toolbar .addbtn { flex: 1 1 100%; padding: 13px; font-size: 16px; } }

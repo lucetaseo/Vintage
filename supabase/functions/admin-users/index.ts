@@ -35,12 +35,17 @@ Deno.serve(async (req) => {
     const { data: auth } = await admin.auth.getUser(jwt);
     if (!auth?.user) fail(401, '로그인이 필요합니다');
     const { data: me } = await admin.from('profiles').select('*').eq('id', auth.user!.id).maybeSingle();
-    if (!me || me.role !== 'admin' || !me.active) fail(403, '관리자만 가능합니다');
+    if (!me || !['admin', 'super'].includes(me.role) || !me.active) fail(403, '관리자만 가능합니다');
+    if (me.role !== 'super') {
+      const { data: ok } = await admin.rpc('license_ok');
+      if (ok === false) fail(403, '이용 기간이 만료되었습니다. 총관리자(개발자)에게 문의하세요');
+    }
 
     const body = await req.json().catch(() => ({}));
 
-    const checkRoleStore = async (role: string, storeId: unknown) => {
-      if (!['admin', 'manager'].includes(role)) fail(400, '권한 값이 올바르지 않습니다');
+    // 총관리자(super)는 앱에서 만들거나 부여할 수 없음 (Supabase SQL 로만 지정)
+    const checkRoleStore = async (role: string, storeId: unknown, allowSuper = false) => {
+      if (!['admin', 'manager', ...(allowSuper ? ['super'] : [])].includes(role)) fail(400, '권한 값이 올바르지 않습니다');
       if (role === 'manager') {
         const { data: s } = await admin.from('stores').select('id').eq('id', Number(storeId)).maybeSingle();
         if (!s) fail(400, '실장 계정은 소속 매장을 선택해야 합니다');
@@ -83,6 +88,7 @@ Deno.serve(async (req) => {
       const id = String(body.id ?? '');
       const { data: cur } = await admin.from('profiles').select('*').eq('id', id).maybeSingle();
       if (!cur) fail(404, '사용자를 찾을 수 없습니다');
+      if (cur.role === 'super' && me.role !== 'super') fail(403, '총관리자 계정은 수정할 수 없습니다');
       const next = {
         name: body.name !== undefined ? String(body.name).trim() : cur.name,
         role: body.role !== undefined ? String(body.role) : cur.role,
@@ -90,8 +96,8 @@ Deno.serve(async (req) => {
         active: body.active !== undefined ? !!body.active : cur.active,
       };
       if (!next.name) fail(400, '이름을 입력하세요');
-      await checkRoleStore(next.role, next.store_id);
-      if (id === me.id && (next.role !== 'admin' || !next.active)) {
+      await checkRoleStore(next.role, next.store_id, cur.role === 'super');
+      if (id === me.id && (next.role !== me.role || !next.active)) {
         fail(400, '본인 계정의 관리자 권한/활성 상태는 바꿀 수 없습니다');
       }
       if (body.password !== undefined && body.password !== '' && String(body.password).length < 6) {

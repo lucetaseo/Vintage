@@ -41,8 +41,25 @@
   const storeName = (id) => state.storeMap[id]?.name || '-';
   const personName = (id) => state.people[id]?.name || '-';
   const photoUrl = (path) => (path ? sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : '');
-  const canManage = (storeId) => state.me && (state.me.role === 'admin' || state.me.store_id === storeId);
-  const isAdmin = () => state.me?.role === 'admin';
+  const ROLE_LABEL = { super: '총관리자', admin: '관리자', manager: '실장' };
+  const isAdmin = () => ['admin', 'super'].includes(state.me?.role);
+  const isSuper = () => state.me?.role === 'super';
+  const canManage = (storeId) => state.me && (isAdmin() || state.me.store_id === storeId);
+  const ymd = (s) => {
+    const [y, m, d] = String(s).split('-').map(Number);
+    return new Date(y, m - 1, d);
+  };
+  const fmtDate = (s) => {
+    if (!s) return '-';
+    const d = typeof s === 'string' ? ymd(s) : s;
+    return `${d.getFullYear()}.${String(d.getMonth() + 1).padStart(2, '0')}.${String(d.getDate()).padStart(2, '0')}`;
+  };
+  const addDays = (s, n) => {
+    const d = ymd(s);
+    d.setDate(d.getDate() + n);
+    return d;
+  };
+  const licenseBlocked = () => state.license?.state === 'expired' && !isSuper();
   const normCode = (s) => String(s || '').toUpperCase().replace(/\s+/g, '');
 
   function errText(error) {
@@ -200,6 +217,9 @@
     clearTimeout(refreshTimer);
     refreshTimer = setTimeout(async () => {
       try {
+        if (!state.me || state.view === 'expired' || state.view === 'login' || state.view === 'setup') return;
+        await loadLicense();
+        if (licenseBlocked()) return renderExpired();
         await loadStores();
         if (state.view === 'list') {
           renderChips();
@@ -261,6 +281,7 @@
       dot.title = state.live ? '실시간 연결됨' : '연결 끊김 - 재연결 중';
     }
   }
+  setInterval(() => state.me && scheduleRefresh(), 30 * 60 * 1000);
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible' && state.me) scheduleRefresh();
   });
@@ -285,6 +306,48 @@
     window.addEventListener('load', () => navigator.serviceWorker.register('./sw.js').catch(() => {}));
   }
 
+  // ---------------- 이용기간 ----------------
+  async function loadLicense() {
+    const { data, error } = await sb.rpc('license_status');
+    if (!error) state.license = (data && data[0]) || null;
+    return state.license;
+  }
+
+  function licenseBanner() {
+    const l = state.license;
+    if (!l) return '';
+    const until = fmtDate(l.paid_until);
+    const go = isSuper() ? ' · <a href="#/license">연장하기</a>' : '';
+    if (l.state === 'warning' && isAdmin()) {
+      return `<div class="lic warn">이용기간이 ${l.days_left === 0 ? '오늘' : `${l.days_left}일 후`} 만료됩니다 (${until}까지)${
+        go || ' · 총관리자에게 연장을 요청하세요'
+      }</div>`;
+    }
+    if (l.state === 'grace') {
+      return `<div class="lic grace">이용기간이 ${until}에 끝났습니다. ${fmtDate(addDays(l.paid_until, l.grace_days))}까지 연장되지 않으면 사용이 중지됩니다${go}</div>`;
+    }
+    if (l.state === 'expired' && isSuper()) {
+      return `<div class="lic grace">이용기간 만료 상태입니다. 총관리자 외 직원은 사용할 수 없습니다${go}</div>`;
+    }
+    return '';
+  }
+
+  function renderExpired() {
+    state.view = 'expired';
+    stopRealtime();
+    const l = state.license;
+    root.innerHTML = `
+      <div class="login-wrap"><div class="card login" style="text-align:center">
+        <h1>VINTAGE</h1>
+        <p style="font-size:17px;font-weight:700;margin:18px 0 8px">이용 기간이 만료되었습니다</p>
+        <p class="hint" style="font-size:14px;line-height:1.7">${l ? `${fmtDate(l.paid_until)}까지 이용 가능했습니다.<br>` : ''}
+          총관리자(개발자)에게 연장을 요청하세요.<br>데이터는 그대로 보관되어 있고, 연장되면 바로 다시 사용할 수 있습니다.</p>
+        <div class="actions"><button class="btn primary block" id="recheck">다시 확인</button><button class="btn" id="out">로그아웃</button></div>
+      </div></div>`;
+    $('#recheck').onclick = (e) => busy(e.target, () => afterLogin());
+    $('#out').onclick = () => sb.auth.signOut();
+  }
+
   // ---------------- 레이아웃 ----------------
   function shell(active, html) {
     const me = state.me;
@@ -296,11 +359,13 @@
           ${link('#/', 'list', '상품목록')}
           ${link('#/new', 'new', '+ 등록')}
           ${isAdmin() ? link('#/admin', 'admin', '관리자') : ''}
+          ${isSuper() ? link('#/license', 'license', '이용관리') : ''}
           ${link('#/account', 'account', '내정보')}
           <a href="#" id="installBtn" ${installPrompt ? '' : 'hidden'}>앱 설치</a>
         </nav>
-        <div class="who">${esc(me.name)} · ${me.role === 'admin' ? '관리자' : esc(storeName(me.store_id))}</div>
+        <div class="who">${esc(me.name)} · ${me.role === 'manager' ? esc(storeName(me.store_id)) : ROLE_LABEL[me.role]}</div>
       </header>
+      ${licenseBanner()}
       <main>${html}</main>`;
     $('#installBtn').onclick = (e) => {
       e.preventDefault();
@@ -349,14 +414,14 @@
     state.view = 'setup';
     root.innerHTML = `
       <div class="login-wrap"><form class="card login" id="setupForm" autocomplete="off">
-        <h1>VINTAGE</h1><p class="sub">처음 오셨네요! 최초 관리자 계정을 만드세요</p>
-        <label class="field"><span>관리자 아이디 (영문/숫자)</span><input type="text" name="username" value="admin" autocapitalize="none" required></label>
-        <label class="field"><span>이름</span><input type="text" name="name" value="관리자" required></label>
+        <h1>VINTAGE</h1><p class="sub">처음 오셨네요! 총관리자(개발자) 계정을 만드세요</p>
+        <label class="field"><span>총관리자 아이디 (영문/숫자)</span><input type="text" name="username" value="admin" autocapitalize="none" required></label>
+        <label class="field"><span>이름</span><input type="text" name="name" value="총관리자" required></label>
         <label class="field"><span>비밀번호 (6자 이상)</span><input type="password" name="password" autocomplete="new-password" minlength="6" required></label>
         <label class="field"><span>비밀번호 확인</span><input type="password" name="password2" autocomplete="new-password" minlength="6" required></label>
         <div class="err" id="setupErr"></div>
-        <button class="btn primary block">관리자 만들기</button>
-        <p class="hint" style="text-align:center;margin-top:14px">이 화면은 관리자가 생기면 다시 나오지 않습니다</p>
+        <button class="btn primary block">총관리자 만들기</button>
+        <p class="hint" style="text-align:center;margin-top:14px">매장 관리자/실장 계정은 로그인 후 [관리자] 메뉴에서 만듭니다</p>
       </form></div>`;
     const f = $('#setupForm');
     const showErr = (m) => ($('#setupErr').textContent = m);
@@ -388,12 +453,14 @@
         }
         if (!(await loadMe())) return showErr('관리자 설정에 실패했습니다. 다시 시도하세요');
         await afterLogin();
-        toast(`관리자 계정(${username})이 만들어졌습니다`);
+        toast(`총관리자 계정(${username})이 만들어졌습니다`);
       });
     };
   }
 
   async function afterLogin() {
+    await loadLicense();
+    if (licenseBlocked()) return renderExpired();
     await Promise.all([loadStores(), loadPeople()]);
     startRealtime();
     route();
@@ -447,6 +514,7 @@
        <div class="toolbar">
          <input type="search" class="search" id="q" placeholder="상품코드 / 이름 검색 (다른 매장 재고 확인)" value="${esc(f.q)}" autocomplete="off" enterkeyhint="search">
          <div class="seg" id="seg">${seg('available', '판매중')}${seg('sold', '판매완료')}${seg('all', '전체')}</div>
+         <a class="btn primary addbtn" href="#/new">+ 상품 등록</a>
        </div>
        <div id="lookup"></div>
        <div class="grid" id="grid"></div>
@@ -510,7 +578,7 @@
     const grid = $('#grid');
     grid.innerHTML = state.list.length ? state.list.map(card).join('') : '';
     $('#more').innerHTML = !state.list.length
-      ? `<div class="empty">상품이 없습니다</div>`
+      ? `<div class="empty">상품이 없습니다<br><br><a class="btn primary" href="#/new" style="display:inline-block;text-decoration:none">+ 상품 등록하기</a></div>`
       : state.hasMore
         ? `<button class="btn" id="moreBtn">더 보기</button>`
         : '';
@@ -654,7 +722,7 @@
       if (!canManage(p.store_id)) return shell('list', `<div class="empty">다른 매장 상품은 수정할 수 없습니다</div>`);
     }
     const me = state.me;
-    const storeLocked = !p && me.role !== 'admin';
+    const storeLocked = !p && !isAdmin();
     const curStore = p ? p.store_id : me.store_id || state.stores[0]?.id;
     const storeOptions = state.stores
       .map((s) => `<option value="${s.id}" ${s.id === curStore ? 'selected' : ''}>${esc(s.name)}</option>`)
@@ -778,7 +846,10 @@
     if (!isAdmin()) return shell('admin', `<div class="empty">관리자만 볼 수 있습니다</div>`);
     await Promise.all([loadStores(), loadPeople()]);
     const users = Object.values(state.people).sort(
-      (a, b) => (a.role === b.role ? a.username.localeCompare(b.username) : a.role === 'admin' ? -1 : 1)
+      (a, b) => {
+        const order = { super: 0, admin: 1, manager: 2 };
+        return order[a.role] - order[b.role] || a.username.localeCompare(b.username);
+      }
     );
     const storeOpts = (sel) =>
       state.stores.map((s) => `<option value="${s.id}" ${s.id === sel ? 'selected' : ''}>${esc(s.name)}</option>`).join('');
@@ -793,10 +864,10 @@
           .map(
             (u) => `<tr class="${u.active ? '' : 'inactive'}">
             <td>${esc(u.username)}</td><td>${esc(u.name)}</td>
-            <td>${u.role === 'admin' ? '관리자' : '실장'}</td>
+            <td>${ROLE_LABEL[u.role] || u.role}</td>
             <td>${u.role === 'manager' ? esc(storeName(u.store_id)) : '전체'}</td>
             <td>${u.active ? '사용중' : '정지'}</td>
-            <td><button class="btn small" data-edit="${u.id}">수정</button></td></tr>`
+            <td>${u.role === 'super' && !isSuper() ? '' : `<button class="btn small" data-edit="${u.id}">수정</button>`}</td></tr>`
           )
           .join('')}
       </table></div>
@@ -829,7 +900,7 @@
     );
 
     const nf = $('#newUser');
-    nf.role.onchange = () => (nf.store_id.disabled = nf.role.value === 'admin');
+    nf.role.onchange = () => (nf.store_id.disabled = nf.role.value !== 'manager');
     nf.onsubmit = async (e) => {
       e.preventDefault();
       $('#uerr').textContent = '';
@@ -877,10 +948,11 @@
       `<h3>${esc(u.username)} 수정</h3>
       <label class="field"><span>이름</span><input type="text" name="name" value="${esc(u.name)}"></label>
       <div class="row">
-        <label class="field"><span>권한</span><select name="role">
+        <label class="field"><span>권한</span><select name="role" ${u.role === 'super' ? 'disabled' : ''}>
+          ${u.role === 'super' ? '<option value="super" selected>총관리자</option>' : ''}
           <option value="manager" ${u.role === 'manager' ? 'selected' : ''}>실장</option>
           <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>관리자</option></select></label>
-        <label class="field"><span>매장</span><select name="store_id" ${u.role === 'admin' ? 'disabled' : ''}>${storeOpts(u.store_id)}</select></label>
+        <label class="field"><span>매장</span><select name="store_id" ${u.role !== 'manager' ? 'disabled' : ''}>${storeOpts(u.store_id)}</select></label>
       </div>
       <label class="field"><span>새 비밀번호 (바꿀 때만)</span><input type="text" name="password" placeholder="비워두면 유지"></label>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" ${u.active ? 'checked' : ''}> 사용 가능 (해제 시 로그인 정지)</label>
@@ -888,7 +960,7 @@
       <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>저장</button></div>`,
       (bg, close) => {
         const g = (n) => $(`[name=${n}]`, bg);
-        g('role').onchange = () => (g('store_id').disabled = g('role').value === 'admin');
+        g('role').onchange = () => (g('store_id').disabled = g('role').value !== 'manager');
         $('[data-x]', bg).onclick = () => close();
         $('[data-ok]', bg).onclick = (e) =>
           busy(e.target, async () => {
@@ -923,8 +995,8 @@
       `<h1>내 정보</h1>
       <div class="card form">
         <dl class="kv"><dt>아이디</dt><dd>${esc(me.username)}</dd><dt>이름</dt><dd>${esc(me.name)}</dd>
-        <dt>권한</dt><dd>${me.role === 'admin' ? '관리자' : '실장'}</dd>
-        <dt>매장</dt><dd>${me.role === 'admin' ? '전체' : esc(storeName(me.store_id))}</dd></dl>
+        <dt>권한</dt><dd>${ROLE_LABEL[me.role]}</dd>
+        <dt>매장</dt><dd>${me.role === 'manager' ? esc(storeName(me.store_id)) : '전체'}</dd></dl>
         <button class="btn" id="logout">로그아웃</button>
       </div>
 
@@ -970,9 +1042,94 @@
     };
   }
 
+  // ---------------- 이용관리 (총관리자 전용) ----------------
+  const LICENSE_LABEL = { ok: '정상', warning: '곧 만료', grace: '만료 (유예기간)', expired: '사용 중지' };
+
+  async function viewLicense() {
+    state.view = 'license';
+    if (!isSuper()) return shell('license', `<div class="empty">총관리자만 볼 수 있습니다</div>`);
+    const [, { data: hist }] = await Promise.all([
+      loadLicense(),
+      sb.from('license_events').select('*').order('created_at', { ascending: false }).limit(50),
+      loadPeople(),
+    ]);
+    const l = state.license;
+    if (!l) return shell('license', `<div class="empty">이용기간 정보를 불러올 수 없습니다. schema.sql 을 최신으로 실행했는지 확인하세요</div>`);
+    shell(
+      'license',
+      `<h1>이용관리</h1>
+      <div class="card form">
+        <dl class="kv">
+          <dt>상태</dt><dd><span class="lic-badge ${l.state}">${LICENSE_LABEL[l.state]}</span></dd>
+          <dt>사용 기한</dt><dd>${fmtDate(l.paid_until)}까지 ${
+            l.days_left >= 0 ? `<span class="hint">(${l.days_left}일 남음)</span>` : `<span class="hint">(${-l.days_left}일 지남)</span>`
+          }</dd>
+          <dt>유예기간</dt><dd>만료 후 ${l.grace_days}일 (${fmtDate(addDays(l.paid_until, l.grace_days))}까지 사용 가능)</dd>
+        </dl>
+        <label class="field"><span>메모 (예: 11월분 입금 확인)</span><input type="text" id="lmemo"></label>
+        <div class="row">
+          <button class="btn primary" data-m="1">+1개월 연장</button>
+          <button class="btn" data-m="3">+3개월</button>
+          <button class="btn" data-m="12">+12개월</button>
+        </div>
+        <p class="hint">남은 기간이 있으면 그 뒤로 이어서, 이미 지났으면 오늘부터 연장됩니다.</p>
+      </div>
+
+      <h2>직접 지정</h2>
+      <form class="card form" id="lset">
+        <div class="row">
+          <label class="field"><span>사용 기한 (이 날까지 사용)</span><input type="date" name="until" value="${esc(l.paid_until)}" required></label>
+          <label class="field"><span>유예기간 (일)</span><input type="number" name="grace" min="0" max="60" value="${l.grace_days}"></label>
+        </div>
+        <div class="err" id="lerr"></div>
+        <button class="btn">저장</button>
+        <p class="hint">기한 + 유예기간이 지나면 총관리자를 뺀 모든 직원의 사용이 중지됩니다. 데이터는 지워지지 않습니다.</p>
+      </form>
+
+      <h2>변경 이력</h2>
+      <div class="table-wrap"><table>
+        <tr><th>일시</th><th>변경</th><th>메모</th><th>처리</th></tr>
+        ${
+          (hist || [])
+            .map(
+              (h) => `<tr><td>${fmt(h.created_at)}</td><td>${fmtDate(h.from_date)} → <b>${fmtDate(h.to_date)}</b></td>
+                <td style="white-space:normal;min-width:140px">${esc(h.memo)}</td><td>${esc(personName(h.user_id))}</td></tr>`
+            )
+            .join('') || '<tr><td colspan="4" class="hint">아직 이력이 없습니다</td></tr>'
+        }
+      </table></div>`
+    );
+
+    root.querySelectorAll('[data-m]').forEach(
+      (b) =>
+        (b.onclick = () =>
+          busy(b, async () => {
+            const { data, error } = await sb.rpc('extend_license', { p_months: Number(b.dataset.m), p_memo: $('#lmemo').value });
+            if (error) return toast(errText(error), 'error');
+            toast(`${fmtDate(data)}까지 연장했습니다`);
+            viewLicense();
+          }))
+    );
+    const f = $('#lset');
+    f.onsubmit = (e) => {
+      e.preventDefault();
+      busy($('button', f), async () => {
+        const { error } = await sb.rpc('set_license', {
+          p_paid_until: f.until.value,
+          p_grace_days: f.grace.value === '' ? null : Number(f.grace.value),
+          p_memo: $('#lmemo').value || '직접 지정',
+        });
+        if (error) return ($('#lerr').textContent = errText(error));
+        toast('저장했습니다');
+        viewLicense();
+      });
+    };
+  }
+
   // ---------------- 라우터 ----------------
   function route() {
     if (!state.me) return renderLogin();
+    if (licenseBlocked()) return renderExpired();
     const h = location.hash.replace(/^#\/?/, '');
     let m;
     state.detailId = null;
@@ -981,6 +1138,7 @@
     if ((m = /^p\/(\d+)$/.exec(h))) return viewDetail(Number(m[1]));
     if (h === 'admin') return viewAdmin();
     if (h === 'account') return viewAccount();
+    if (h === 'license') return viewLicense();
     return viewList();
   }
   window.addEventListener('hashchange', route);
