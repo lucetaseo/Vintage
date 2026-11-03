@@ -41,7 +41,18 @@
   const storeName = (id) => state.storeMap[id]?.name || '-';
   const personName = (id) => state.people[id]?.name || '-';
   const photoUrl = (path) => (path ? sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : '');
-  const ROLE_LABEL = { super: '총관리자', admin: '관리자', manager: '실장' };
+  const ROLE_LABEL = { super: '총관리자', admin: '관리자', manager: '실장', cashier: '캐셔' };
+  const PAY_LABEL = { cash: '현금', card: '카드', transfer: '이체' };
+  const isCashier = () => state.me?.role === 'cashier';
+  const needsStore = (role) => role === 'manager' || role === 'cashier';
+  const kstToday = () => new Date().toLocaleDateString('sv-SE', { timeZone: 'Asia/Seoul' });
+  const shiftDate = (ymdStr, n) => {
+    const [y, m, d] = ymdStr.split('-').map(Number);
+    const dt = new Date(Date.UTC(y, m - 1, d + n));
+    return dt.toISOString().slice(0, 10);
+  };
+  const kstStart = (ymdStr) => `${ymdStr}T00:00:00+09:00`;
+  const hhmm = (t) => new Date(t).toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit', hour12: false });
   const isAdmin = () => ['admin', 'super'].includes(state.me?.role);
   const isSuper = () => state.me?.role === 'super';
   const canManage = (storeId) => state.me && (isAdmin() || state.me.store_id === storeId);
@@ -224,6 +235,10 @@
         if (state.view === 'list') {
           renderChips();
           await loadList(true, Math.max(state.list.length, PAGE));
+        } else if (state.view === 'sell') {
+          await loadToday();
+        } else if (state.view === 'settle') {
+          await loadSettle();
         } else if (state.view === 'detail' && state.detailId) {
           await viewDetail(state.detailId, true);
         }
@@ -356,15 +371,15 @@
       <header class="topbar">
         <a class="brand" href="#/">VINTAGE<span id="live" class="live ${state.live ? 'on' : ''}"></span></a>
         <nav class="nav">
-          ${link('#/', 'list', '상품목록')}
-          ${link('#/new', 'new', '+ 등록')}
-          ${link('#/scan', 'scan', '스캔')}
+          ${isCashier() ? '' : link('#/', 'list', '상품목록')}
+          ${link('#/sell', 'sell', '상품 판매')}
+          ${link('#/settle', 'settle', '정산')}
           ${isAdmin() ? link('#/admin', 'admin', '관리자') : ''}
           ${isSuper() ? link('#/license', 'license', '이용관리') : ''}
           ${link('#/account', 'account', '내정보')}
           <a href="#" id="installBtn" ${installPrompt ? '' : 'hidden'}>앱 설치</a>
         </nav>
-        <div class="who">${esc(me.name)} · ${me.role === 'manager' ? esc(storeName(me.store_id)) : ROLE_LABEL[me.role]}</div>
+        <div class="who">${esc(me.name)} · ${ROLE_LABEL[me.role]}${me.store_id ? ` · ${esc(storeName(me.store_id))}` : ''}</div>
       </header>
       ${licenseBanner()}
       <main>${html}</main>`;
@@ -525,7 +540,7 @@
          <input type="search" class="search" id="q" placeholder="상품코드 / 이름 검색 (다른 매장 재고 확인)" value="${esc(f.q)}" autocomplete="off" enterkeyhint="search">
          <div class="seg" id="seg">${seg('available', '판매중')}${seg('sold', '판매완료')}${seg('all', '전체')}</div>
          <a class="btn primary addbtn" href="#/new">+ 상품 등록</a>
-         <a class="btn addbtn" href="#/scan">📷 스캔</a>
+         <a class="btn addbtn" href="#/sell">💳 상품 판매</a>
          <a class="btn addbtn" href="#/labels">🏷 라벨</a>
        </div>
        <div id="lookup"></div>
@@ -663,7 +678,7 @@
             ${
               sold
                 ? `<div class="soldbox">${fmt(p.sold_at)} ${esc(storeName(p.sold_store_id))}에서 판매 · ${esc(personName(p.sold_by))}
-                   ${p.sold_price != null ? `<br>판매가 ${won(p.sold_price)}` : ''}</div>`
+                   ${p.sold_price != null ? `<br>판매가 ${won(p.sold_price)}` : ''}${p.sold_payment ? ` · ${PAY_LABEL[p.sold_payment]}` : ''}</div>`
                 : ''
             }
             ${
@@ -693,11 +708,10 @@
     const sellBtn = $('#sellBtn');
     if (sellBtn)
       sellBtn.onclick = async () => {
-        const v = await promptBox(`${p.code} 판매 처리`, '판매 가격 (원)', p.price ?? '', '판매 완료', 'sell', 'numeric');
-        if (v === null) return;
-        const price = String(v).replace(/[^0-9]/g, '');
+        const r = await sellDialog(p);
+        if (!r) return;
         await busy(sellBtn, async () => {
-          const { error: e } = await sb.rpc('sell_product', { p_id: p.id, p_sold_price: price === '' ? null : Number(price) });
+          const { error: e } = await sb.rpc('sell_product', { p_id: p.id, p_sold_price: r.price, p_payment: r.payment });
           if (e) return toast(errText(e), 'error');
           toast(`${p.code} 판매완료 처리됨 - 모든 매장에 반영됩니다`);
           viewDetail(p.id, true);
@@ -867,7 +881,7 @@
     await Promise.all([loadStores(), loadPeople()]);
     const users = Object.values(state.people).sort(
       (a, b) => {
-        const order = { super: 0, admin: 1, manager: 2 };
+        const order = { super: 0, admin: 1, manager: 2, cashier: 3 };
         return order[a.role] - order[b.role] || a.username.localeCompare(b.username);
       }
     );
@@ -885,7 +899,7 @@
             (u) => `<tr class="${u.active ? '' : 'inactive'}">
             <td>${esc(u.username)}</td><td>${esc(u.name)}</td>
             <td>${ROLE_LABEL[u.role] || u.role}</td>
-            <td>${u.role === 'manager' ? esc(storeName(u.store_id)) : '전체'}</td>
+            <td>${needsStore(u.role) ? esc(storeName(u.store_id)) : '전체'}</td>
             <td>${u.active ? '사용중' : '정지'}</td>
             <td>${u.role === 'super' && !isSuper() ? '' : `<button class="btn small" data-edit="${u.id}">수정</button>`}</td></tr>`
           )
@@ -899,7 +913,7 @@
           <label class="field"><span>이름</span><input type="text" name="name" required placeholder="예: 김실장"></label>
         </div>
         <div class="row">
-          <label class="field"><span>권한</span><select name="role"><option value="manager">실장</option><option value="admin">관리자</option></select></label>
+          <label class="field"><span>권한</span><select name="role"><option value="manager">실장</option><option value="cashier">캐셔 (판매·정산만)</option><option value="admin">관리자</option></select></label>
           <label class="field"><span>소속 매장</span><select name="store_id">${storeOpts(state.stores[0]?.id)}</select></label>
         </div>
         <label class="field"><span>초기 비밀번호 (6자 이상)</span><input type="text" name="password" required minlength="6"></label>
@@ -920,7 +934,7 @@
     );
 
     const nf = $('#newUser');
-    nf.role.onchange = () => (nf.store_id.disabled = nf.role.value !== 'manager');
+    nf.role.onchange = () => (nf.store_id.disabled = !needsStore(nf.role.value));
     nf.onsubmit = async (e) => {
       e.preventDefault();
       $('#uerr').textContent = '';
@@ -971,8 +985,9 @@
         <label class="field"><span>권한</span><select name="role" ${u.role === 'super' ? 'disabled' : ''}>
           ${u.role === 'super' ? '<option value="super" selected>총관리자</option>' : ''}
           <option value="manager" ${u.role === 'manager' ? 'selected' : ''}>실장</option>
+          <option value="cashier" ${u.role === 'cashier' ? 'selected' : ''}>캐셔</option>
           <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>관리자</option></select></label>
-        <label class="field"><span>매장</span><select name="store_id" ${u.role !== 'manager' ? 'disabled' : ''}>${storeOpts(u.store_id)}</select></label>
+        <label class="field"><span>매장</span><select name="store_id" ${!needsStore(u.role) ? 'disabled' : ''}>${storeOpts(u.store_id)}</select></label>
       </div>
       <label class="field"><span>새 비밀번호 (바꿀 때만)</span><input type="text" name="password" placeholder="비워두면 유지"></label>
       <label style="display:flex;gap:8px;align-items:center"><input type="checkbox" name="active" ${u.active ? 'checked' : ''}> 사용 가능 (해제 시 로그인 정지)</label>
@@ -980,7 +995,7 @@
       <div class="row"><button class="btn" data-x>닫기</button><button class="btn primary" data-ok>저장</button></div>`,
       (bg, close) => {
         const g = (n) => $(`[name=${n}]`, bg);
-        g('role').onchange = () => (g('store_id').disabled = g('role').value !== 'manager');
+        g('role').onchange = () => (g('store_id').disabled = !needsStore(g('role').value));
         $('[data-x]', bg).onclick = () => close();
         $('[data-ok]', bg).onclick = (e) =>
           busy(e.target, async () => {
@@ -1016,7 +1031,7 @@
       <div class="card form">
         <dl class="kv"><dt>아이디</dt><dd>${esc(me.username)}</dd><dt>이름</dt><dd>${esc(me.name)}</dd>
         <dt>권한</dt><dd>${ROLE_LABEL[me.role]}</dd>
-        <dt>매장</dt><dd>${me.role === 'manager' ? esc(storeName(me.store_id)) : '전체'}</dd></dl>
+        <dt>매장</dt><dd>${me.store_id ? esc(storeName(me.store_id)) : '전체'}</dd></dl>
         <button class="btn" id="logout">로그아웃</button>
       </div>
 
@@ -1164,9 +1179,34 @@
     return scriptCache[src];
   }
 
-  // ---------------- 스캔 판매 ----------------
+  // ---------------- 상품 판매 (계산대 화면) ----------------
   let scanner = null;
   let lastScan = { code: '', at: 0 };
+  const isTouch = () => matchMedia('(pointer: coarse)').matches;
+
+  // 결제수단 + 가격 선택 창 (상품 상세 화면에서 판매할 때)
+  function sellDialog(p) {
+    return modal(
+      `<h3>${esc(p.code)} 판매</h3>
+      <div>${esc(p.name)}</div>
+      <label class="field" style="margin-top:12px"><span>판매 가격 (원)</span><input type="text" inputmode="numeric" value="${p.price ?? ''}"></label>
+      <div class="paybtns">${Object.entries(PAY_LABEL)
+        .map(([k, v]) => `<button class="btn sell" data-pay="${k}">${v}</button>`)
+        .join('')}</div>
+      <div class="row"><button class="btn" data-x>취소</button></div>`,
+      (bg, close) => {
+        const input = $('input', bg);
+        $('[data-x]', bg).onclick = () => close(null);
+        bg.querySelectorAll('[data-pay]').forEach(
+          (b) =>
+            (b.onclick = () => {
+              const v = input.value.replace(/[^0-9]/g, '');
+              close({ price: v === '' ? null : Number(v), payment: b.dataset.pay });
+            })
+        );
+      }
+    );
+  }
 
   async function stopScanner() {
     const sc = scanner;
@@ -1180,28 +1220,37 @@
     } catch {}
   }
 
+  function focusScanInput() {
+    const input = $('#scanInput');
+    if (input && !isTouch() && !document.querySelector('.modal-bg')) input.focus();
+  }
+
   function resumeScanner() {
     try {
       if (scanner) scanner.resume();
     } catch {}
-    const input = $('#scanInput');
-    if (input && !matchMedia('(pointer: coarse)').matches) input.focus();
+    focusScanInput();
   }
 
-  function viewScan() {
-    state.view = 'scan';
+  function viewSell() {
+    state.view = 'sell';
+    const me = state.me;
     shell(
-      'scan',
-      `<h1>스캔</h1>
-      <div class="scan-wrap">
-        <div>
+      'sell',
+      `<div class="pos">
+        <div class="pos-main">
+          <h1>상품 판매</h1>
+          <input type="text" id="scanInput" class="pos-input" placeholder="바코드/QR을 찍거나 상품코드 입력 후 Enter" autocomplete="off" autocapitalize="characters" enterkeyhint="go">
           <div id="reader" class="reader"></div>
-          <button class="btn primary block" id="camBtn">📷 카메라로 찍기</button>
-          <label class="field" style="margin-top:14px"><span>바코드 스캐너 / 직접 입력</span>
-            <input type="text" id="scanInput" placeholder="상품코드 입력 후 Enter" autocomplete="off" autocapitalize="characters" enterkeyhint="go"></label>
-          <p class="hint">QR코드와 바코드 모두 됩니다. 찍으면 상품이 뜨고, [판매 완료]를 눌러야 판매 처리됩니다.</p>
+          <button class="btn block" id="camBtn">📷 카메라로 찍기</button>
+          <div id="scanResult" style="margin-top:14px"></div>
         </div>
-        <div id="scanResult"></div>
+        <div class="pos-side">
+          <h2>오늘 판매 <small class="hint">${me.store_id ? esc(storeName(me.store_id)) : '전체 매장'}</small></h2>
+          <div id="todayTotals"></div>
+          <div id="todayList"></div>
+          <p><a href="#/settle">정산 자세히 보기 →</a></p>
+        </div>
       </div>`
     );
     const input = $('#scanInput');
@@ -1212,9 +1261,14 @@
         handleScan(v);
       }
     };
-    if (!matchMedia('(pointer: coarse)').matches) input.focus();
+    // PC 계산대: 화면 어디를 눌러도 입력칸에 커서 유지 → 스캐너로 바로 찍기
+    $('.pos').addEventListener('click', (e) => {
+      if (!e.target.closest('input, button, a, select, textarea, label')) focusScanInput();
+    });
+    focusScanInput();
     $('#camBtn').onclick = startCamera;
-    if (matchMedia('(pointer: coarse)').matches) startCamera(); // 휴대폰은 바로 카메라 켜기
+    if (isTouch()) startCamera(); // 휴대폰은 바로 카메라
+    loadToday();
   }
 
   async function startCamera() {
@@ -1229,7 +1283,7 @@
     btn.textContent = '카메라 준비 중…';
     try {
       await loadScript('./vendor/html5-qrcode-2.3.8.min.js');
-      if (state.view !== 'scan') return;
+      if (state.view !== 'sell') return;
       const L = window.__Html5QrcodeLibrary__;
       const F = L.Html5QrcodeSupportedFormats;
       const sc = new L.Html5Qrcode('reader', {
@@ -1254,7 +1308,7 @@
         },
         () => {}
       );
-      if (state.view !== 'scan') {
+      if (state.view !== 'sell') {
         sc.stop().catch(() => {});
         return;
       }
@@ -1283,46 +1337,61 @@
     navigator.vibrate?.(60);
     el.innerHTML = `<div class="card empty">${esc(code)} 찾는 중…</div>`;
     const { data: p, error } = await sb.from('products').select('*').eq('code', code).maybeSingle();
-    if (state.view !== 'scan') return;
+    if (state.view !== 'sell') return;
     if (error) {
       el.innerHTML = `<div class="scan-card none"><strong>${esc(errText(error))}</strong></div>`;
       return resumeScanner();
     }
-    const again = `<button class="btn" data-again>다시 스캔</button>`;
+    const again = `<button class="btn" data-again>취소 / 다음 상품</button>`;
     if (!p) {
       el.innerHTML = `<div class="scan-card none">
         <strong>등록되지 않은 코드</strong><div class="bigcode">${esc(code)}</div>
-        <div class="actions"><a class="btn primary" href="#/new?code=${encodeURIComponent(code)}" style="text-align:center;text-decoration:none">이 코드로 상품 등록</a>${again}</div></div>`;
+        <div class="actions">${
+          isCashier()
+            ? '<p class="hint">실장에게 상품 등록을 요청하세요</p>'
+            : `<a class="btn primary" href="#/new?code=${encodeURIComponent(code)}" style="text-align:center;text-decoration:none">이 코드로 상품 등록</a>`
+        }${again}</div></div>`;
     } else {
       const sold = p.status === 'sold';
       const manage = canManage(p.store_id);
-      const head = `<img src="${esc(photoUrl(p.photo_path))}" alt="">
-        <div class="bigcode">${esc(p.code)}</div>
-        <div>${esc(p.name)}</div>
-        <div class="scan-price">${won(p.price)}</div>
-        <div class="hint">${esc(storeName(p.store_id))}</div>`;
+      const head = `<div class="scan-head"><img src="${esc(photoUrl(p.thumb_path || p.photo_path))}" alt="">
+        <div><div class="bigcode">${esc(p.code)}</div><div>${esc(p.name)}</div>
+        <div class="scan-price">${won(p.price)}</div><div class="hint">${esc(storeName(p.store_id))}</div></div></div>`;
       if (sold) {
         el.innerHTML = `<div class="scan-card sold">${head}
           <div class="soldbox">이미 판매된 상품입니다<br>${fmt(p.sold_at)} · ${esc(storeName(p.sold_store_id))} · ${esc(personName(p.sold_by))}</div>
-          <div class="actions"><a class="btn" href="#/p/${p.id}" style="text-align:center;text-decoration:none">상세 보기</a>${again}</div></div>`;
+          <div class="actions">${again}</div></div>`;
       } else if (!manage) {
         el.innerHTML = `<div class="scan-card warn">${head}
           <div class="warnbox">${esc(storeName(p.store_id))} 상품입니다. 판매는 해당 매장에서 처리합니다.</div>
-          <div class="actions"><a class="btn" href="#/p/${p.id}" style="text-align:center;text-decoration:none">상세 보기</a>${again}</div></div>`;
+          <div class="actions">${again}</div></div>`;
       } else {
         el.innerHTML = `<div class="scan-card ok">${head}
-          <label class="field" style="margin-top:12px"><span>판매 가격 (원)</span>
+          <label class="field" style="margin-top:12px"><span>판매 가격 (원) · 할인 시 수정</span>
             <input type="text" inputmode="numeric" id="soldPrice" value="${p.price ?? ''}"></label>
-          <div class="actions"><button class="btn sell block" id="scanSell">판매 완료</button>${again}</div></div>`;
-        $('#scanSell').onclick = (e) =>
-          busy(e.target, async () => {
-            const price = $('#soldPrice').value.replace(/[^0-9]/g, '');
-            const { error: se } = await sb.rpc('sell_product', { p_id: p.id, p_sold_price: price === '' ? null : Number(price) });
-            if (se) return toast(errText(se), 'error');
-            el.innerHTML = `<div class="scan-card done"><strong>✅ ${esc(p.code)} 판매 완료</strong>
-              <div class="hint">모든 매장에 반영되었습니다. 다음 상품을 찍으세요.</div></div>`;
-            resumeScanner();
-          });
+          <div class="paybtns big">${Object.entries(PAY_LABEL)
+            .map(([k, v]) => `<button class="btn sell" data-pay="${k}">${v}</button>`)
+            .join('')}</div>
+          <div class="actions">${again}</div></div>`;
+        el.querySelectorAll('[data-pay]').forEach(
+          (b) =>
+            (b.onclick = () =>
+              busy(b, async () => {
+                el.querySelectorAll('[data-pay]').forEach((x) => (x.disabled = true));
+                const price = $('#soldPrice').value.replace(/[^0-9]/g, '');
+                const amount = price === '' ? null : Number(price);
+                const { error: se } = await sb.rpc('sell_product', { p_id: p.id, p_sold_price: amount, p_payment: b.dataset.pay });
+                if (se) {
+                  el.querySelectorAll('[data-pay]').forEach((x) => (x.disabled = false));
+                  return toast(errText(se), 'error');
+                }
+                el.innerHTML = `<div class="scan-card done"><strong>✅ ${esc(p.code)} 판매 완료</strong>
+                  <div>${won(amount)} · ${PAY_LABEL[b.dataset.pay]}</div>
+                  <div class="hint">모든 매장에 반영되었습니다. 다음 상품을 찍으세요.</div></div>`;
+                loadToday();
+                resumeScanner();
+              }))
+        );
       }
     }
     const a = $('[data-again]', el);
@@ -1331,6 +1400,235 @@
         el.innerHTML = '';
         resumeScanner();
       };
+    if (!p || p.status === 'sold' || !canManage(p.store_id)) resumeScanner();
+    else focusScanInput();
+  }
+
+  // 판매 내역 조회 (오늘 판매 / 정산 공용)
+  async function fetchSales(from, to, storeId) {
+    let qb = sb
+      .from('products')
+      .select('*')
+      .eq('status', 'sold')
+      .gte('sold_at', kstStart(from))
+      .lt('sold_at', kstStart(shiftDate(to, 1)))
+      .order('sold_at', { ascending: false })
+      .limit(3000);
+    if (storeId) qb = qb.eq('sold_store_id', Number(storeId));
+    const { data, error } = await qb;
+    if (error) throw error;
+    return data || [];
+  }
+
+  function salesTotals(rows) {
+    const t = { count: rows.length, total: 0, cash: 0, card: 0, transfer: 0, none: 0 };
+    for (const r of rows) {
+      const v = Number(r.sold_price) || 0;
+      t.total += v;
+      t[r.sold_payment || 'none'] += v;
+    }
+    return t;
+  }
+
+  function totalsHtml(t) {
+    return `<div class="totals">
+      <div><span>판매 건수</span><b>${t.count}건</b></div>
+      <div class="sum"><span>총 매출</span><b>${won(t.total)}</b></div>
+      <div><span>현금</span><b>${won(t.cash)}</b></div>
+      <div><span>카드</span><b>${won(t.card)}</b></div>
+      <div><span>이체</span><b>${won(t.transfer)}</b></div>
+      ${t.none ? `<div><span>결제수단 미지정</span><b>${won(t.none)}</b></div>` : ''}
+    </div>`;
+  }
+
+  const canCancelSale = (r) =>
+    isCashier() ? r.sold_by === state.me.id && new Date(r.sold_at) >= new Date(kstStart(kstToday())) : canManage(r.store_id);
+
+  async function cancelSale(r) {
+    const reason = await promptBox(`${r.code} 판매 취소`, '사유 (예: 환불, 잘못 찍음)', '', '판매 취소', 'sell');
+    if (reason === null) return false;
+    const { error } = await sb.rpc('unsell_product', { p_id: r.id, p_reason: reason });
+    if (error) {
+      toast(errText(error), 'error');
+      return false;
+    }
+    toast(`${r.code} 판매를 취소했습니다 (판매중으로 복구)`);
+    return true;
+  }
+
+  async function loadToday() {
+    const box = $('#todayList');
+    if (!box) return;
+    const today = kstToday();
+    let rows;
+    try {
+      rows = await fetchSales(today, today, state.me.store_id);
+    } catch (e) {
+      return toast(errText(e), 'error');
+    }
+    if (state.view !== 'sell') return;
+    $('#todayTotals').innerHTML = totalsHtml(salesTotals(rows));
+    box.innerHTML = rows.length
+      ? `<div class="sale-list">${rows
+          .slice(0, 50)
+          .map(
+            (r) => `<div class="sale-row">
+            <span class="t">${hhmm(r.sold_at)}</span>
+            <span class="n"><b>${esc(r.code)}</b> ${esc(r.name)}<br><small class="hint">${esc(personName(r.sold_by))}</small></span>
+            <span class="p">${won(r.sold_price)}<br><small class="pay ${r.sold_payment || ''}">${PAY_LABEL[r.sold_payment] || '-'}</small></span>
+            ${canCancelSale(r) ? `<button class="btn small" data-cancel="${r.id}">취소</button>` : '<span></span>'}
+          </div>`
+          )
+          .join('')}</div>`
+      : '<div class="empty" style="padding:20px 0">아직 오늘 판매가 없습니다</div>';
+    box.querySelectorAll('[data-cancel]').forEach(
+      (b) =>
+        (b.onclick = async () => {
+          const r = rows.find((x) => x.id === Number(b.dataset.cancel));
+          if (await cancelSale(r)) loadToday();
+          focusScanInput();
+        })
+    );
+  }
+
+  // ---------------- 정산 ----------------
+  const settle = { from: null, to: null, store: null, rows: [] };
+
+  function viewSettle() {
+    state.view = 'settle';
+    const today = kstToday();
+    if (!settle.from) {
+      settle.from = today;
+      settle.to = today;
+    }
+    const lockStore = !isAdmin();
+    if (lockStore) settle.store = state.me.store_id;
+    shell(
+      'settle',
+      `<h1>정산</h1>
+      <div class="card form" style="max-width:none">
+        <div class="row">
+          <label class="field"><span>시작일</span><input type="date" id="sFrom" value="${settle.from}"></label>
+          <label class="field"><span>종료일</span><input type="date" id="sTo" value="${settle.to}"></label>
+          <label class="field"><span>매장</span><select id="sStore" ${lockStore ? 'disabled' : ''}>
+            ${lockStore ? '' : `<option value="">전체 매장</option>`}
+            ${state.stores.map((s) => `<option value="${s.id}" ${String(settle.store) === String(s.id) ? 'selected' : ''}>${esc(s.name)}</option>`).join('')}
+          </select></label>
+        </div>
+        <div class="row quick">
+          <button class="btn small" data-q="today">오늘</button>
+          <button class="btn small" data-q="yesterday">어제</button>
+          <button class="btn small" data-q="week">최근 7일</button>
+          <button class="btn small" data-q="month">이번 달</button>
+          <span></span>
+        </div>
+      </div>
+      <div id="sTotals" style="margin-top:14px"></div>
+      <div id="sBySeller"></div>
+      <div class="row" style="margin:14px 0 8px"><h2 style="margin:0">판매 내역</h2><span></span>
+        <button class="btn small" id="sCsv">엑셀(CSV) 받기</button><button class="btn small" id="sPrint">인쇄</button></div>
+      <div id="sList"></div>`
+    );
+    const upd = () => {
+      settle.from = $('#sFrom').value || today;
+      settle.to = $('#sTo').value || settle.from;
+      if (settle.to < settle.from) settle.to = settle.from;
+      if (!lockStore) settle.store = $('#sStore').value || null;
+      loadSettle();
+    };
+    $('#sFrom').onchange = upd;
+    $('#sTo').onchange = upd;
+    $('#sStore').onchange = upd;
+    root.querySelectorAll('[data-q]').forEach(
+      (b) =>
+        (b.onclick = () => {
+          const q = b.dataset.q;
+          let f = today;
+          let t = today;
+          if (q === 'yesterday') f = t = shiftDate(today, -1);
+          if (q === 'week') f = shiftDate(today, -6);
+          if (q === 'month') f = `${today.slice(0, 8)}01`;
+          $('#sFrom').value = f;
+          $('#sTo').value = t;
+          upd();
+        })
+    );
+    $('#sCsv').onclick = () => {
+      const head = ['판매일시', '매장', '상품코드', '상품명', '판매가', '결제수단', '판매자'];
+      const lines = settle.rows.map((r) =>
+        [
+          new Date(r.sold_at).toLocaleString('ko-KR', { timeZone: 'Asia/Seoul' }),
+          storeName(r.sold_store_id),
+          r.code,
+          r.name,
+          r.sold_price ?? '',
+          PAY_LABEL[r.sold_payment] || '',
+          personName(r.sold_by),
+        ]
+          .map((v) => `"${String(v).replace(/"/g, '""')}"`)
+          .join(',')
+      );
+      const blob = new Blob(['﻿' + [head.join(','), ...lines].join('\r\n')], { type: 'text/csv;charset=utf-8' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `sales_${settle.from}_${settle.to}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    };
+    $('#sPrint').onclick = () => window.print();
+    loadSettle();
+  }
+
+  async function loadSettle() {
+    if (!$('#sList')) return;
+    let rows;
+    try {
+      rows = await fetchSales(settle.from, settle.to, settle.store);
+    } catch (e) {
+      return toast(errText(e), 'error');
+    }
+    if (state.view !== 'settle') return;
+    settle.rows = rows;
+    const period = settle.from === settle.to ? fmtDate(settle.from) : `${fmtDate(settle.from)} ~ ${fmtDate(settle.to)}`;
+    $('#sTotals').innerHTML = `<p class="hint" style="margin:0 0 6px">${period} · ${settle.store ? esc(storeName(Number(settle.store))) : '전체 매장'}</p>${totalsHtml(
+      salesTotals(rows)
+    )}`;
+    const bySeller = {};
+    for (const r of rows) {
+      const k = r.sold_by || '-';
+      bySeller[k] = bySeller[k] || { count: 0, total: 0 };
+      bySeller[k].count++;
+      bySeller[k].total += Number(r.sold_price) || 0;
+    }
+    $('#sBySeller').innerHTML = rows.length
+      ? `<h2>판매자별</h2><div class="table-wrap"><table><tr><th>판매자</th><th>건수</th><th>금액</th></tr>${Object.entries(bySeller)
+          .sort((a, b) => b[1].total - a[1].total)
+          .map(([k, v]) => `<tr><td>${esc(personName(k))}</td><td>${v.count}건</td><td>${won(v.total)}</td></tr>`)
+          .join('')}</table></div>`
+      : '';
+    $('#sList').innerHTML = rows.length
+      ? `<div class="table-wrap"><table>
+        <tr><th>일시</th><th>매장</th><th>상품</th><th>판매가</th><th>결제</th><th>판매자</th><th></th></tr>
+        ${rows
+          .map(
+            (r) => `<tr><td>${fmt(r.sold_at)}</td><td>${esc(storeName(r.sold_store_id))}</td>
+            <td><b>${esc(r.code)}</b> ${esc(r.name)}</td><td>${won(r.sold_price)}</td>
+            <td><span class="pay ${r.sold_payment || ''}">${PAY_LABEL[r.sold_payment] || '-'}</span></td>
+            <td>${esc(personName(r.sold_by))}</td>
+            <td>${canCancelSale(r) ? `<button class="btn small" data-cancel="${r.id}">취소</button>` : ''}</td></tr>`
+          )
+          .join('')}</table></div>`
+      : '<div class="empty">이 기간에 판매 내역이 없습니다</div>';
+    root.querySelectorAll('#sList [data-cancel]').forEach(
+      (b) =>
+        (b.onclick = async () => {
+          const r = rows.find((x) => x.id === Number(b.dataset.cancel));
+          if (await cancelSale(r)) loadSettle();
+        })
+    );
   }
 
   // ---------------- 라벨 출력 (QR 또는 바코드 선택 → 인쇄 / 이미지 저장) ----------------
@@ -1340,7 +1638,7 @@
     '60x40': { name: '라벨프린터 60×40mm', w: 60, h: 40 },
     a4: { name: 'A4 스티커 21칸 (63.5×38.1mm)', w: 63.5, h: 38.1, sheet: { cols: 3, rows: 7, top: 15.15, left: 7.2, pitchX: 66, pitchY: 38.1 } },
   };
-  const LABEL_TYPES = { qr: 'QR코드', barcode: '바코드' };
+  const LABEL_TYPES = { barcode: '바코드', qr: 'QR코드' }; // 기본은 바코드
   const LABEL_FONT = '"Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", Arial, sans-serif';
   const DPI = 300;
   const mmPx = (v) => Math.round((v / 25.4) * DPI);
@@ -1502,7 +1800,7 @@
     today.setHours(0, 0, 0, 0);
     const checked = new Set(ids.length ? products.map((p) => p.id) : products.filter((p) => new Date(p.created_at) >= today).map((p) => p.id));
     let sizeKey = LABEL_SIZES[pref('labelSize')] ? pref('labelSize') : '50x30';
-    let type = LABEL_TYPES[pref('labelType')] ? pref('labelType') : 'qr';
+    let type = 'barcode'; // 항상 바코드로 시작, [QR코드]를 눌러야 바뀜
 
     shell(
       'list',
@@ -1570,7 +1868,6 @@
       (b) =>
         (b.onclick = () => {
           type = b.dataset.type;
-          pref('labelType', type);
           $('#ltype').querySelectorAll('button').forEach((x) => x.classList.toggle('active', x === b));
           renderPreview();
         })
@@ -1627,14 +1924,20 @@
     const params = new URLSearchParams(qs);
     let m;
     state.detailId = null;
-    if (h !== 'scan') stopScanner();
+    if (h !== 'sell' && h !== 'scan') stopScanner();
+    if (h === 'sell' || h === 'scan') return viewSell();
+    if (h === 'settle') return viewSettle();
+    if (h === 'account') return viewAccount();
+    // 캐셔는 상품 판매 · 정산 · 내정보만 사용
+    if (isCashier()) {
+      history.replaceState(null, '', '#/sell');
+      return viewSell();
+    }
     if (h === 'new') return viewForm(null, normCode(params.get('code') || ''));
-    if (h === 'scan') return viewScan();
     if (h === 'labels') return viewLabels((params.get('ids') || '').split(',').map(Number).filter(Boolean));
     if ((m = /^p\/(\d+)\/edit$/.exec(h))) return viewForm(Number(m[1]));
     if ((m = /^p\/(\d+)$/.exec(h))) return viewDetail(Number(m[1]));
     if (h === 'admin') return viewAdmin();
-    if (h === 'account') return viewAccount();
     if (h === 'license') return viewLicense();
     return viewList();
   }

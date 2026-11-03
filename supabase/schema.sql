@@ -15,7 +15,7 @@ create table if not exists public.profiles (
   id         uuid primary key references auth.users(id) on delete cascade,
   username   text not null unique,
   name       text not null,
-  role       text not null check (role in ('super', 'admin', 'manager')),
+  role       text not null check (role in ('super', 'admin', 'manager', 'cashier')),
   store_id   bigint references public.stores(id),
   active     boolean not null default true,
   created_at timestamptz not null default now()
@@ -55,9 +55,15 @@ create table if not exists public.product_events (
 );
 create index if not exists product_events_product_idx on public.product_events (product_id, created_at);
 
+-- 결제수단 (정산용): cash 현금 / card 카드 / transfer 계좌이체
+alter table public.products add column if not exists sold_payment text;
+alter table public.products drop constraint if exists products_sold_payment_check;
+alter table public.products add constraint products_sold_payment_check check (sold_payment in ('cash', 'card', 'transfer'));
+create index if not exists products_sold_store_idx on public.products (sold_store_id, sold_at desc);
+
 -- 기존 설치본 업그레이드: 총관리자(super) 등급 허용
 alter table public.profiles drop constraint if exists profiles_role_check;
-alter table public.profiles add constraint profiles_role_check check (role in ('super', 'admin', 'manager'));
+alter table public.profiles add constraint profiles_role_check check (role in ('super', 'admin', 'manager', 'cashier'));
 
 -- ---------- 이용기간 (총관리자가 매달 연장) ----------
 create table if not exists public.license (
@@ -162,6 +168,7 @@ declare
   v_dup   record;
   v_id    bigint;
 begin
+  if v_me.role = 'cashier' then raise exception '캐셔 계정은 상품을 등록할 수 없습니다'; end if;
   if v_code = '' then raise exception '상품코드를 입력하세요'; end if;
   if length(v_code) > 40 then raise exception '상품코드가 너무 깁니다'; end if;
   v_store := case when v_me.role in ('admin', 'super') then p_store_id else v_me.store_id end;
@@ -201,6 +208,7 @@ declare
   v_from text; v_to text;
   v_old  text[] := '{}';
 begin
+  if v_me.role = 'cashier' then raise exception '캐셔 계정은 상품을 수정할 수 없습니다'; end if;
   select * into v_p from products where id = p_id for update;
   if not found then raise exception '상품을 찾을 수 없습니다'; end if;
   if v_me.role not in ('admin', 'super') and v_me.store_id is distinct from v_p.store_id then
@@ -247,7 +255,8 @@ end $$;
 
 -- ---------- 판매 처리 ----------
 -- 행 잠금(for update)으로 두 매장에서 동시에 눌러도 한 번만 성공합니다.
-create or replace function public.sell_product(p_id bigint, p_sold_price integer default null)
+drop function if exists public.sell_product(bigint, integer);
+create or replace function public.sell_product(p_id bigint, p_sold_price integer default null, p_payment text default null)
 returns void
 language plpgsql security definer set search_path = public as $$
 declare
@@ -268,12 +277,18 @@ begin
   if v_me.role not in ('admin', 'super') and v_me.store_id is distinct from v_p.store_id then
     raise exception '이 상품은 % 상품입니다. 해당 매장에서만 판매 처리할 수 있습니다', v_store;
   end if;
+  if p_payment is not null and p_payment not in ('cash', 'card', 'transfer') then
+    raise exception '결제수단이 올바르지 않습니다';
+  end if;
   v_price := coalesce(p_sold_price, v_p.price);
   update products set status = 'sold', sold_at = now(), sold_by = v_me.id,
-         sold_store_id = store_id, sold_price = v_price, updated_at = now()
+         sold_store_id = store_id, sold_price = v_price, sold_payment = p_payment, updated_at = now()
    where id = p_id;
   insert into product_events (product_id, action, detail, user_id, store_id)
-  values (p_id, 'sold', case when v_price is null then '' else to_char(v_price, 'FM999,999,999') || '원' end,
+  values (p_id, 'sold',
+          concat_ws(' · ',
+            case when v_price is null then null else to_char(v_price, 'FM999,999,999') || '원' end,
+            case p_payment when 'cash' then '현금' when 'card' then '카드' when 'transfer' then '이체' end),
           v_me.id, v_p.store_id);
 end $$;
 
@@ -291,8 +306,12 @@ begin
   if v_me.role not in ('admin', 'super') and v_me.store_id is distinct from v_p.store_id then
     raise exception '판매한 매장 또는 관리자만 취소할 수 있습니다';
   end if;
+  if v_me.role = 'cashier' and (v_p.sold_by is distinct from v_me.id
+      or (v_p.sold_at at time zone 'Asia/Seoul')::date <> (now() at time zone 'Asia/Seoul')::date) then
+    raise exception '캐셔는 본인이 오늘 판매한 건만 취소할 수 있습니다. 실장에게 요청하세요';
+  end if;
   update products set status = 'available', sold_at = null, sold_by = null,
-         sold_store_id = null, sold_price = null, updated_at = now()
+         sold_store_id = null, sold_price = null, sold_payment = null, updated_at = now()
    where id = p_id;
   insert into product_events (product_id, action, detail, user_id, store_id)
   values (p_id, 'unsold', trim(coalesce(p_reason, '')), v_me.id, v_p.store_id);
@@ -431,14 +450,14 @@ grant execute on function public.extend_license(int, text) to authenticated;
 -- 함수는 로그인한 사용자만 호출
 revoke execute on function public.create_product(text, text, integer, text, bigint, text, text) from public, anon;
 revoke execute on function public.update_product(bigint, text, text, integer, text, bigint, text, text) from public, anon;
-revoke execute on function public.sell_product(bigint, integer) from public, anon;
+revoke execute on function public.sell_product(bigint, integer, text) from public, anon;
 revoke execute on function public.unsell_product(bigint, text) from public, anon;
 revoke execute on function public.delete_product(bigint) from public, anon;
 revoke execute on function public.suggest_code() from public, anon;
 revoke execute on function public.store_summary() from public, anon;
 grant execute on function public.create_product(text, text, integer, text, bigint, text, text) to authenticated;
 grant execute on function public.update_product(bigint, text, text, integer, text, bigint, text, text) to authenticated;
-grant execute on function public.sell_product(bigint, integer) to authenticated;
+grant execute on function public.sell_product(bigint, integer, text) to authenticated;
 grant execute on function public.unsell_product(bigint, text) to authenticated;
 grant execute on function public.delete_product(bigint) to authenticated;
 grant execute on function public.suggest_code() to authenticated;

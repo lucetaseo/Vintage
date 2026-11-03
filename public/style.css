@@ -176,25 +176,50 @@ tr.inactive td { color: var(--muted); text-decoration: line-through; }
 .addbtn { text-decoration: none; display: inline-flex; align-items: center; justify-content: center; }
 @media (max-width: 640px) { .toolbar .addbtn { flex: 1 1 30%; padding: 13px 8px; font-size: 15px; } .toolbar .addbtn.primary { flex-basis: 100%; } }
 
-/* scan */
-.scan-wrap { display: grid; gap: 16px; }
-@media (min-width: 760px) { .scan-wrap { grid-template-columns: 1fr 1fr; align-items: start; } }
+/* 판매하기 (계산대) */
+.pos { display: grid; gap: 20px; }
+@media (min-width: 900px) { .pos { grid-template-columns: minmax(0, 1.2fr) minmax(0, 1fr); align-items: start; } }
+.pos-input { font-size: 20px !important; padding: 16px !important; border: 2px solid var(--ink) !important; margin-bottom: 10px; }
 .reader { width: 100%; border-radius: var(--radius); overflow: hidden; background: #111; margin-bottom: 10px; }
 .reader:empty { display: none; }
 .reader video { width: 100% !important; display: block; }
-.scan-card { background: var(--card); border: 2px solid var(--line); border-radius: var(--radius); padding: 16px; text-align: center; }
-.scan-card img { width: 100%; max-width: 280px; aspect-ratio: 1; object-fit: cover; border-radius: 10px; background: #ece5dc; }
-.scan-card .bigcode { margin-top: 8px; }
+.scan-card { background: var(--card); border: 2px solid var(--line); border-radius: var(--radius); padding: 16px; }
+.scan-head { display: flex; gap: 14px; align-items: center; }
+.scan-head img { width: 120px; height: 120px; flex: none; object-fit: cover; border-radius: 10px; background: #ece5dc; }
 .scan-card.ok { border-color: var(--ok); }
 .scan-card.sold { border-color: var(--sold); }
 .scan-card.sold img { filter: grayscale(1); }
 .scan-card.warn { border-color: #d9a400; }
-.scan-card.done { border-color: var(--ok); background: var(--ok-bg); color: var(--ok); font-size: 18px; }
+.scan-card.done { border-color: var(--ok); background: var(--ok-bg); color: var(--ok); font-size: 18px; text-align: center; }
+.scan-card.none { text-align: center; }
 .scan-card.none strong { display: block; font-size: 17px; margin-bottom: 6px; }
-.scan-price { font-size: 22px; font-weight: 800; margin: 4px 0; }
-.warnbox { background: #fff3cd; color: #7a5a00; padding: 12px; border-radius: 10px; font-weight: 600; margin-top: 10px; }
-.scan-card .soldbox { margin-top: 10px; }
-.scan-card .actions { margin-top: 12px; }
+.scan-price { font-size: 24px; font-weight: 800; margin: 2px 0; }
+.warnbox { background: #fff3cd; color: #7a5a00; padding: 12px; border-radius: 10px; font-weight: 600; margin-top: 12px; text-align: center; }
+.scan-card .soldbox { margin-top: 12px; text-align: center; }
+.scan-card .actions { margin-top: 10px; }
+.paybtns { display: grid; grid-template-columns: repeat(3, 1fr); gap: 8px; margin-top: 10px; }
+.paybtns .btn { padding: 14px 6px; font-size: 16px; }
+.paybtns.big .btn { padding: 20px 6px; font-size: 20px; }
+.totals { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+.totals > div { background: var(--card); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px; }
+.totals span { display: block; font-size: 12px; color: var(--muted); }
+.totals b { font-size: 17px; }
+.totals .sum { background: var(--ink); color: #fff; border-color: var(--ink); }
+.totals .sum span { color: #cfc6bd; }
+.sale-list { margin-top: 10px; background: var(--card); border: 1px solid var(--line); border-radius: var(--radius); }
+.sale-row { display: grid; grid-template-columns: 46px 1fr auto auto; gap: 8px; align-items: center; padding: 9px 12px; border-bottom: 1px solid var(--line); font-size: 14px; }
+.sale-row:last-child { border-bottom: 0; }
+.sale-row .t { color: var(--muted); font-size: 13px; }
+.sale-row .p { text-align: right; font-weight: 700; }
+.pay { display: inline-block; font-size: 11px; font-weight: 700; padding: 1px 7px; border-radius: 999px; background: #eee8e1; color: var(--muted); }
+.pay.cash { background: #e3f2e8; color: var(--ok); }
+.pay.card { background: #e3ecf8; color: #2a5a9a; }
+.pay.transfer { background: #f3e6f5; color: #7a3a8a; }
+.quick { justify-content: flex-start; }
+.quick > .btn { flex: none; }
+@media print {
+  .topbar, .lic, .quick, #sCsv, #sPrint, [data-cancel] { display: none !important; }
+}
 
 /* labels */
 .pick-list { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 8px; }

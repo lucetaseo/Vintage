@@ -45,10 +45,10 @@ Deno.serve(async (req) => {
 
     // 총관리자(super)는 앱에서 만들거나 부여할 수 없음 (Supabase SQL 로만 지정)
     const checkRoleStore = async (role: string, storeId: unknown, allowSuper = false) => {
-      if (!['admin', 'manager', ...(allowSuper ? ['super'] : [])].includes(role)) fail(400, '권한 값이 올바르지 않습니다');
-      if (role === 'manager') {
+      if (!['admin', 'manager', 'cashier', ...(allowSuper ? ['super'] : [])].includes(role)) fail(400, '권한 값이 올바르지 않습니다');
+      if (role === 'manager' || role === 'cashier') {
         const { data: s } = await admin.from('stores').select('id').eq('id', Number(storeId)).maybeSingle();
-        if (!s) fail(400, '실장 계정은 소속 매장을 선택해야 합니다');
+        if (!s) fail(400, '실장/캐셔 계정은 소속 매장을 선택해야 합니다');
       }
     };
 
@@ -75,7 +75,7 @@ Deno.serve(async (req) => {
         username,
         name,
         role,
-        store_id: role === 'manager' ? Number(body.store_id) : null,
+        store_id: role === 'manager' || role === 'cashier' ? Number(body.store_id) : null,
       });
       if (pErr) {
         await admin.auth.admin.deleteUser(created.user!.id);
@@ -116,7 +116,7 @@ Deno.serve(async (req) => {
         .update({
           name: next.name,
           role: next.role,
-          store_id: next.role === 'manager' ? Number(next.store_id) : null,
+          store_id: next.role === 'manager' || next.role === 'cashier' ? Number(next.store_id) : null,
           active: next.active,
         })
         .eq('id', id);
