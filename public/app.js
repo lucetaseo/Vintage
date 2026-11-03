@@ -1511,8 +1511,12 @@
   async function showJoinQr(storeId) {
     if (!storeId) return toast('매장을 찾을 수 없습니다', 'error');
     await loadScript('./vendor/qrcode-generator-1.4.4.js');
-    const { data: st, error } = await sb.from('stores').select('id, name, biz_name, join_token, join_poster').eq('id', storeId).maybeSingle();
+    // select('*'): DB 업데이트가 늦어 새 칸(join_poster 등)이 없어도 QR은 뜨도록
+    const { data: st, error } = await sb.from('stores').select('*').eq('id', storeId).maybeSingle();
     if (error || !st) return toast(errText(error || '매장을 찾을 수 없습니다'), 'error');
+    if (!st.join_token) {
+      return toast('회원가입 QR을 쓰려면 Supabase SQL Editor 에서 최신 schema.sql 을 실행해야 합니다', 'error');
+    }
     const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}join.html?s=${st.join_token}`;
     const qr = window.qrcode(0, 'M');
     qr.addData(url);
@@ -1691,7 +1695,10 @@
                 .from('stores')
                 .update({ join_poster: { theme: o.theme, paper: o.paper, title: o.title, perk: o.perk, steps: o.steps, footer: o.footer } })
                 .eq('id', st.id);
-              if (error) return ($('[data-err]', bg).textContent = errText(error));
+              if (error)
+                return ($('[data-err]', bg).textContent = /join_poster/.test(error.message)
+                  ? '디자인 저장은 최신 schema.sql 을 실행한 뒤에 됩니다 (인쇄는 지금도 가능)'
+                  : errText(error));
               st.join_poster = { ...o };
               toast('디자인을 저장했습니다. 다른 직원도 같은 디자인으로 인쇄합니다');
             });
