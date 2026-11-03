@@ -767,7 +767,7 @@
 
   // ---------------- 관리자 ----------------
   async function invokeAdmin(body) {
-    const { data, error } = await sb.functions.invoke('admin-users', { body });
+    const { data, error } = await sb.functions.invoke(CFG.ADMIN_FUNCTION || 'admin-users', { body });
     if (error) {
       let msg = error.message;
       try {
