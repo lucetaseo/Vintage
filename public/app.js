@@ -946,7 +946,8 @@
         ${state.stores
           .map(
             (s) => `<div class="row" style="margin-bottom:8px"><span>${esc(s.name)} <small class="hint">재고 ${s.available}</small></span>
-            <button class="btn small" data-rename="${s.id}">매장 정보 / 영수증 설정</button></div>`
+            <span style="flex:none;display:flex;gap:6px"><button class="btn small" data-joinqr="${s.id}">📱 회원가입 QR</button>
+            <button class="btn small" data-rename="${s.id}">매장 정보 / 영수증 설정</button></span></div>`
           )
           .join('')}
         <button class="btn" id="addStore" style="margin-top:6px">+ 매장 추가</button>
@@ -982,6 +983,7 @@
         (b.onclick = () => editStore(Number(b.dataset.rename)))
     );
     renderAdminPromo();
+    root.querySelectorAll('[data-joinqr]').forEach((b) => (b.onclick = () => showJoinQr(Number(b.dataset.joinqr))));
     $('#addStore').onclick = async () => {
       const name = await promptBox('매장 추가', '매장 이름', `${state.stores.length + 1}호점`);
       if (!name || !name.trim()) return;
@@ -1014,8 +1016,10 @@
       <div class="card form">
         <label style="display:flex;gap:8px;align-items:center;margin-bottom:12px"><input type="checkbox" id="psOn" ${st.points_enabled ? 'checked' : ''}> 포인트 사용 (회원 적립·사용)</label>
         <div class="row">
-          <label class="field"><span>적립률 (결제금액의 %)</span><input type="text" inputmode="decimal" id="psRate" value="${Number(st.point_rate)}"></label>
+          <label class="field"><span>적립률 (결제금액의 %, 소수점 가능)</span><input type="text" inputmode="decimal" id="psRate" value="${Number(st.point_rate)}" placeholder="예: 0.5, 1, 2.5">
+            <span class="rate-quick">${[0.5, 1, 2, 2.5, 3, 5].map((r) => `<button type="button" class="btn small" data-rate="${r}">${r}%</button>`).join('')}</span></label>
           <label class="field"><span>최소 사용 포인트</span><input type="text" inputmode="numeric" id="psMin" value="${st.point_min_use}"></label>
+          <label class="field"><span>가입 축하 포인트 (QR 가입)</span><input type="text" inputmode="numeric" id="psJoin" value="${st.join_points ?? 0}"></label>
         </div>
         <p class="hint" style="margin-top:0">1P = 1원. 쿠폰·할인을 뺀 실제 결제 금액 기준으로 적립됩니다. 영수증을 취소하면 적립은 회수되고 사용한 포인트는 돌려줍니다.</p>
         <button class="btn" id="psSave">저장</button>
@@ -1041,13 +1045,15 @@
       busy(e.target, async () => {
         const { error } = await sb.rpc('set_point_settings', {
           p_enabled: $('#psOn').checked,
-          p_rate: Number(String($('#psRate').value).replace(/[^0-9.]/g, '')) || 0,
+          p_rate: Math.round((Number(String($('#psRate').value).replace(',', '.').replace(/[^0-9.]/g, '')) || 0) * 100) / 100,
           p_min_use: numVal($('#psMin').value) ?? 0,
+          p_join_points: numVal($('#psJoin').value) ?? 0,
         });
         if (error) return toast(errText(error), 'error');
         toast('포인트 설정을 저장했습니다');
         loadSettings();
       });
+    box.querySelectorAll('[data-rate]').forEach((b) => (b.onclick = () => ($('#psRate').value = b.dataset.rate)));
     $('#cpNew').onclick = () => editCoupon(null);
     box.querySelectorAll('[data-cp]').forEach((b) => (b.onclick = () => editCoupon(coupons.find((c) => c.id === Number(b.dataset.cp)))));
   }
@@ -1122,11 +1128,12 @@
       if (state.view !== 'members') return;
       if (error) return toast(errText(error), 'error');
       $('#mList').innerHTML = (data || []).length
-        ? `<div class="table-wrap"><table><tr><th>이름</th><th>전화번호</th><th>포인트</th><th>가입일</th><th>메모</th></tr>
+        ? `<div class="table-wrap"><table><tr><th>이름</th><th>전화번호</th><th>포인트</th><th>가입일</th><th>가입</th><th>문자 수신</th><th>메모</th></tr>
           ${data
             .map(
               (m) => `<tr class="click" data-m="${m.id}"><td><b>${esc(m.name || '-')}</b></td><td>${esc(fmtPhone(m.phone))}</td>
               <td>${Number(m.points).toLocaleString('ko-KR')}P</td><td>${fmtDate(String(m.created_at).slice(0, 10))}</td>
+              <td>${m.join_source === 'qr' ? '📱 QR' : '직원'}</td><td>${m.marketing_agreed ? '동의' : '-'}</td>
               <td style="white-space:normal">${esc(m.memo)}</td></tr>`
             )
             .join('')}</table></div>${data.length === 200 ? '<p class="hint">최근 200명까지 표시됩니다. 검색으로 찾아보세요.</p>' : ''}`
@@ -1242,6 +1249,83 @@
             if (error) return toast(errText(error), 'error');
             toast('회원을 삭제했습니다');
             after?.();
+          };
+      }
+    );
+  }
+
+  // ---------------- 회원가입 QR ----------------
+  async function showJoinQr(storeId) {
+    if (!storeId) return toast('매장을 찾을 수 없습니다', 'error');
+    await loadScript('./vendor/qrcode-generator-1.4.4.js');
+    const { data: st, error } = await sb.from('stores').select('id, name, biz_name, join_token').eq('id', storeId).maybeSingle();
+    if (error || !st) return toast(errText(error || '매장을 찾을 수 없습니다'), 'error');
+    const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}join.html?s=${st.join_token}`;
+    const qr = window.qrcode(0, 'M');
+    qr.addData(url);
+    qr.make();
+    const svg = qr.createSvgTag({ cellSize: 6, margin: 3, scalable: true });
+    const title = esc(st.biz_name || st.name);
+    const jp = Number(state.settings?.join_points) || 0;
+    modal(
+      `<h3>${title} 회원가입 QR</h3>
+      <div class="join-qr">${svg}</div>
+      <p class="hint" style="text-align:center">손님이 휴대폰 카메라로 찍으면 가입 화면이 열립니다${jp ? ` · 가입 시 ${jp.toLocaleString('ko-KR')}P 적립` : ''}</p>
+      <div class="row" style="flex-wrap:wrap">
+        <button class="btn" data-x>닫기</button>
+        <button class="btn" data-copy>링크 복사</button>
+        <button class="btn primary" data-print>🖨 안내문 인쇄</button>
+      </div>
+      ${
+        isAdmin()
+          ? `<div class="danger-zone"><button class="btn small danger" data-rotate>QR 새로 만들기</button>
+             <p class="hint">QR이 밖으로 퍼져 장난 가입이 생기면 새로 만드세요. 예전 QR은 더 이상 쓸 수 없습니다.</p></div>`
+          : ''
+      }`,
+      (bg, close) => {
+        $('[data-x]', bg).onclick = () => close();
+        $('[data-copy]', bg).onclick = async () => {
+          try {
+            await navigator.clipboard.writeText(url);
+            toast('링크를 복사했습니다');
+          } catch {
+            promptBox('가입 링크', '아래 주소를 복사하세요', url, '닫기');
+          }
+        };
+        $('[data-print]', bg).onclick = () => {
+          document.getElementById('printArea')?.remove();
+          document.getElementById('printPage')?.remove();
+          const area = document.createElement('div');
+          area.id = 'printArea';
+          area.innerHTML = `<div class="join-poster">
+            <div class="jp-store">${title}</div>
+            <div class="jp-title">회원가입하고<br>포인트 받으세요</div>
+            ${jp ? `<div class="jp-perk">지금 가입하면 ${jp.toLocaleString('ko-KR')}P 적립</div>` : ''}
+            <div class="jp-qr">${svg}</div>
+            <div class="jp-how">휴대폰 카메라로 QR코드를 찍어주세요</div>
+          </div>`;
+          document.body.appendChild(area);
+          const stl = document.createElement('style');
+          stl.id = 'printPage';
+          stl.textContent = '@page { size: A5; margin: 10mm }';
+          document.head.appendChild(stl);
+          const cleanup = () => {
+            area.remove();
+            stl.remove();
+            window.removeEventListener('afterprint', cleanup);
+          };
+          window.addEventListener('afterprint', cleanup);
+          setTimeout(() => window.print(), 50);
+        };
+        const rot = $('[data-rotate]', bg);
+        if (rot)
+          rot.onclick = async () => {
+            close();
+            if (!(await confirmBox('QR 새로 만들기', '지금 붙어 있는 QR 안내문은 더 이상 쓸 수 없게 됩니다. 새 QR을 다시 인쇄해야 합니다.', '새로 만들기', 'sell'))) return;
+            const { error: e2 } = await sb.rpc('rotate_join_token', { p_store_id: storeId });
+            if (e2) return toast(errText(e2), 'error');
+            toast('새 QR을 만들었습니다');
+            showJoinQr(storeId);
           };
       }
     );
@@ -1933,7 +2017,8 @@
       `<h3>회원 찾기</h3>
       <div class="row"><input type="text" id="mpQ" placeholder="전화번호 뒷자리 또는 이름" inputmode="text"><button class="btn primary" id="mpGo">찾기</button></div>
       <div id="mpList" class="mp-list"></div>
-      <details id="mpNewBox" style="margin-top:12px"><summary><b>+ 새 회원 가입</b></summary>
+      <button class="btn block" id="mpQr" style="margin-top:12px">📱 손님이 직접 가입 (QR 보여주기)</button>
+      <details id="mpNewBox" style="margin-top:8px"><summary><b>+ 직원이 대신 가입</b></summary>
         <div style="margin-top:10px">
           <label class="field"><span>전화번호 *</span><input type="text" inputmode="tel" id="mpPhone" placeholder="010-0000-0000"></label>
           <label class="field"><span>이름</span><input type="text" id="mpName"></label>
@@ -1970,6 +2055,10 @@
           }
         };
         $('#mpGo', bg).onclick = search;
+        $('#mpQr', bg).onclick = () => {
+          close(null);
+          showJoinQr(cart.items[0]?.store_id || state.me.store_id || state.stores[0]?.id);
+        };
         q.onkeydown = (e) => e.key === 'Enter' && search();
         $('#mpSave', bg).onclick = (e) =>
           busy(e.target, async () => {

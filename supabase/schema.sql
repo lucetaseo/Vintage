@@ -97,6 +97,9 @@ alter table public.stores add column if not exists owner_name     text not null 
 alter table public.stores add column if not exists address        text not null default '';
 alter table public.stores add column if not exists phone          text not null default '';
 alter table public.stores add column if not exists toss_merchant_id text not null default '';  -- 토스플레이스 연동 준비
+-- QR 회원가입용 매장별 비밀 코드 (QR 주소에 들어감, 유출 시 관리자가 새로 발급)
+alter table public.stores add column if not exists join_token text not null default replace(gen_random_uuid()::text, '-', '');
+create unique index if not exists stores_join_token_key on public.stores (join_token);
 alter table public.stores add column if not exists receipt_footer text not null default '빈티지 상품 특성상 교환·환불이 어려울 수 있습니다. 감사합니다.';
 
 -- ---------- 회원 / 포인트 / 쿠폰 (구조만 준비, 화면은 나중에) ----------
@@ -133,6 +136,14 @@ create table if not exists public.app_settings (
   updated_at      timestamptz not null default now()
 );
 insert into public.app_settings (id) values (1) on conflict (id) do nothing;
+alter table public.app_settings add column if not exists join_points integer not null default 0;   -- 가입 축하 포인트
+
+-- 회원: 가입 경로 / 개인정보·광고 동의
+alter table public.members add column if not exists join_source       text not null default 'staff';  -- staff 직원 등록 / qr 손님 직접
+alter table public.members add column if not exists join_store_id     bigint references public.stores(id);
+alter table public.members add column if not exists privacy_agreed_at timestamptz;                     -- 개인정보 수집·이용 동의 시각
+alter table public.members add column if not exists marketing_agreed  boolean not null default false;   -- 광고(문자) 수신 동의
+create index if not exists members_created_idx on public.members (created_at desc);
 
 -- ---------- 시재 (영업 시작 ~ 마감 현금 관리) ----------
 create table if not exists public.cash_sessions (
@@ -799,7 +810,8 @@ begin
 end $$;
 
 -- 포인트 설정 (관리자)
-create or replace function public.set_point_settings(p_enabled boolean, p_rate numeric, p_min_use integer)
+drop function if exists public.set_point_settings(boolean, numeric, integer);
+create or replace function public.set_point_settings(p_enabled boolean, p_rate numeric, p_min_use integer, p_join_points integer default null)
 returns void
 language plpgsql security definer set search_path = public as $$
 declare v_me profiles := current_profile();
@@ -807,7 +819,77 @@ begin
   if v_me.role not in ('admin', 'super') then raise exception '관리자만 포인트 설정을 바꿀 수 있습니다'; end if;
   if p_rate is null or p_rate < 0 or p_rate > 100 then raise exception '적립률은 0~100%% 사이로 입력하세요'; end if;
   if p_min_use is null or p_min_use < 0 then raise exception '최소 사용 포인트가 올바르지 않습니다'; end if;
-  update app_settings set points_enabled = coalesce(p_enabled, true), point_rate = p_rate, point_min_use = p_min_use, updated_at = now() where id = 1;
+  if p_join_points is not null and (p_join_points < 0 or p_join_points > 1000000) then raise exception '가입 축하 포인트가 올바르지 않습니다'; end if;
+  update app_settings set points_enabled = coalesce(p_enabled, true), point_rate = p_rate, point_min_use = p_min_use,
+         join_points = coalesce(p_join_points, join_points), updated_at = now() where id = 1;
+end $$;
+
+-- ---------- QR 회원가입 (손님 직접, 로그인 없이) ----------
+-- 가입 페이지가 매장 이름/축하 포인트를 보여주기 위한 조회. 비밀 코드가 맞아야만 응답
+create or replace function public.join_info(p_token text)
+returns jsonb
+language plpgsql stable security definer set search_path = public as $$
+declare
+  v_s   stores;
+  v_set app_settings;
+begin
+  select * into v_s from stores where join_token = coalesce(p_token, '') and length(coalesce(p_token, '')) >= 16;
+  if not found then raise exception '잘못된 가입 QR입니다. 매장에 문의해 주세요'; end if;
+  select * into v_set from app_settings where id = 1;
+  return jsonb_build_object('store_name', coalesce(nullif(v_s.biz_name, ''), v_s.name),
+                            'join_points', case when coalesce(v_set.points_enabled, true) then coalesce(v_set.join_points, 0) else 0 end,
+                            'point_rate', case when coalesce(v_set.points_enabled, true) then v_set.point_rate else 0 end);
+end $$;
+
+create or replace function public.public_join(p_token text, p_name text, p_phone text, p_privacy boolean, p_marketing boolean default false)
+returns jsonb
+language plpgsql security definer set search_path = public as $$
+declare
+  v_s     stores;
+  v_set   app_settings;
+  v_phone text := regexp_replace(coalesce(p_phone, ''), '[^0-9]', '', 'g');
+  v_name  text := left(trim(coalesce(p_name, '')), 30);
+  v_id    bigint;
+  v_pts   integer := 0;
+begin
+  select * into v_s from stores where join_token = coalesce(p_token, '') and length(coalesce(p_token, '')) >= 16;
+  if not found then raise exception '잘못된 가입 QR입니다. 매장에 문의해 주세요'; end if;
+  if not coalesce(p_privacy, false) then raise exception '개인정보 수집·이용에 동의해야 가입할 수 있습니다'; end if;
+  if v_phone !~ '^01[016789][0-9]{7,8}$' then raise exception '휴대폰 번호를 정확히 입력해 주세요'; end if;
+  if v_name = '' then raise exception '이름을 입력해 주세요'; end if;
+  -- 이미 가입한 번호면 정보를 알려주지 않고 '이미 가입됨'만 응답
+  if exists (select 1 from members where phone = v_phone) then
+    return jsonb_build_object('status', 'exists');
+  end if;
+  -- 장난 가입 방지: 매장별 최근 10분 QR 가입 30건 초과 시 잠시 중지
+  if (select count(*) from members where join_store_id = v_s.id and join_source = 'qr' and created_at > now() - interval '10 minutes') >= 30 then
+    raise exception '가입 요청이 많습니다. 잠시 후 다시 시도해 주세요';
+  end if;
+  select * into v_set from app_settings where id = 1;
+  if coalesce(v_set.points_enabled, true) then v_pts := coalesce(v_set.join_points, 0); end if;
+  insert into members (name, phone, points, join_source, join_store_id, privacy_agreed_at, marketing_agreed)
+  values (v_name, v_phone, v_pts, 'qr', v_s.id, now(), coalesce(p_marketing, false))
+  on conflict (phone) do nothing
+  returning id into v_id;
+  if v_id is null then return jsonb_build_object('status', 'exists'); end if;
+  if v_pts > 0 then
+    insert into point_ledger (member_id, delta, reason) values (v_id, v_pts, '가입 축하 (QR 가입)');
+  end if;
+  return jsonb_build_object('status', 'joined', 'points', v_pts, 'store_name', coalesce(nullif(v_s.biz_name, ''), v_s.name));
+end $$;
+
+-- QR 새로 발급 (기존 QR 은 더 이상 사용 불가)
+create or replace function public.rotate_join_token(p_store_id bigint)
+returns text
+language plpgsql security definer set search_path = public as $$
+declare
+  v_me profiles := current_profile();
+  v_t  text := replace(gen_random_uuid()::text, '-', '');
+begin
+  if v_me.role not in ('admin', 'super') then raise exception '관리자만 QR을 새로 만들 수 있습니다'; end if;
+  update stores set join_token = v_t where id = p_store_id;
+  if not found then raise exception '매장을 찾을 수 없습니다'; end if;
+  return v_t;
 end $$;
 
 -- ---------- 부분환불 (준비: 화면 없음, 관리자/실장용) ----------
@@ -1088,7 +1170,10 @@ revoke execute on function public.adjust_points(bigint, integer, text) from publ
 revoke execute on function public.delete_member(bigint) from public, anon;
 revoke execute on function public.save_coupon(bigint, text, text, text, integer, integer, date, date, integer, boolean) from public, anon;
 revoke execute on function public.coupon_quote(text, integer) from public, anon;
-revoke execute on function public.set_point_settings(boolean, numeric, integer) from public, anon;
+revoke execute on function public.set_point_settings(boolean, numeric, integer, integer) from public, anon;
+revoke execute on function public.join_info(text) from public;
+revoke execute on function public.public_join(text, text, text, boolean, boolean) from public;
+revoke execute on function public.rotate_join_token(bigint) from public, anon;
 revoke execute on function public.cancel_sale(bigint, text) from public, anon;
 revoke execute on function public.refund_sale_items(bigint, bigint[], text) from public, anon;
 revoke execute on function public.cash_expected(bigint) from public, anon;
@@ -1109,7 +1194,10 @@ grant execute on function public.adjust_points(bigint, integer, text) to authent
 grant execute on function public.delete_member(bigint) to authenticated;
 grant execute on function public.save_coupon(bigint, text, text, text, integer, integer, date, date, integer, boolean) to authenticated;
 grant execute on function public.coupon_quote(text, integer) to authenticated;
-grant execute on function public.set_point_settings(boolean, numeric, integer) to authenticated;
+grant execute on function public.set_point_settings(boolean, numeric, integer, integer) to authenticated;
+grant execute on function public.join_info(text) to anon, authenticated;            -- 로그인 없이 가입 페이지에서 호출
+grant execute on function public.public_join(text, text, text, boolean, boolean) to anon, authenticated;
+grant execute on function public.rotate_join_token(bigint) to authenticated;
 grant execute on function public.cancel_sale(bigint, text) to authenticated;
 grant execute on function public.refund_sale_items(bigint, bigint[], text) to authenticated;
 grant execute on function public.cash_expected(bigint) to authenticated;
