@@ -180,6 +180,9 @@
   }
   async function preparePhoto(file) {
     const img = await loadImage(file);
+    return photoFrom(img);
+  }
+  async function photoFrom(img) {
     const [full, thumb] = await Promise.all([toJpeg(img, 1280, 0.82), toJpeg(img, 480, 0.75)]);
     return { full, thumb };
   }
@@ -798,6 +801,12 @@
           <input type="file" accept="image/*" capture="environment" id="file">
           <span id="pickLabel">${p ? '' : '📷 사진 찍기 / 선택'}</span>
         </label>
+        <div class="bg-tools" id="bgTools" hidden>
+          <button type="button" class="btn small" id="bgRun">✂️ 배경 지우기</button>
+          <button type="button" class="btn small" id="bgUndo" hidden>↩ 원본 사진으로</button>
+          <span class="hint" id="bgMsg"></span>
+        </div>
+        <label class="bg-auto"><input type="checkbox" id="bgAuto" ${pref('bgAuto') === '1' ? 'checked' : ''}> 사진을 넣으면 자동으로 배경 지우기 (흰 배경)</label>
         <label class="field"><span>상품코드 *</span>
           <div class="row"><input type="text" name="code" required value="${esc(p?.code || presetCode)}" autocapitalize="characters">
           ${p ? '' : '<button type="button" class="btn" id="autoCode">자동</button>'}</div>
@@ -818,16 +827,66 @@
 
     const form = $('#pform');
     let photo = null;
+    let srcImg = null; // 원본 (배경 지우기 되돌리기용)
+    let original = null;
+    let bgBusy = false;
+    const showPhoto = (ph) => {
+      const pick = $('#pick');
+      pick.style.backgroundImage = `url('${URL.createObjectURL(ph.thumb)}')`;
+      pick.classList.add('has');
+      $('#pickLabel').textContent = '';
+    };
+    const runBg = async () => {
+      if (!srcImg || bgBusy) return;
+      bgBusy = true;
+      const btn = $('#bgRun');
+      btn.disabled = true;
+      $('#saveBtn').disabled = true;
+      $('#bgMsg').textContent = window.BgRemove ? '배경 지우는 중…' : '배경 지우기 준비 중… (처음 한 번만 몇 초 걸려요)';
+      try {
+        await loadScript('./bgremove.js');
+        const out = await window.BgRemove.run(srcImg);
+        photo = await photoFrom(out);
+        showPhoto(photo);
+        $('#bgUndo').hidden = false;
+        btn.hidden = true;
+        $('#bgMsg').textContent = '✓ 배경을 지웠어요. 마음에 안 들면 원본으로 되돌리세요';
+        pref('bgUsed', '1');
+      } catch (err) {
+        $('#bgMsg').textContent = errText(err);
+      } finally {
+        bgBusy = false;
+        btn.disabled = false;
+        $('#saveBtn').disabled = false;
+      }
+    };
+    $('#bgRun').onclick = runBg;
+    $('#bgUndo').onclick = () => {
+      photo = original;
+      showPhoto(photo);
+      $('#bgUndo').hidden = true;
+      $('#bgRun').hidden = false;
+      $('#bgMsg').textContent = '원본 사진을 사용합니다';
+    };
+    $('#bgAuto').onchange = (e) => {
+      pref('bgAuto', e.target.checked ? '1' : '0');
+      if (e.target.checked && srcImg && photo === original) runBg();
+    };
     $('#file').onchange = async (e) => {
       const file = e.target.files[0];
       if (!file) return;
       $('#pickLabel').textContent = '사진 처리 중…';
       try {
-        photo = await preparePhoto(file);
-        const pick = $('#pick');
-        pick.style.backgroundImage = `url('${URL.createObjectURL(photo.thumb)}')`;
-        pick.classList.add('has');
-        $('#pickLabel').textContent = '';
+        srcImg = await loadImage(file);
+        original = await photoFrom(srcImg);
+        photo = original;
+        showPhoto(photo);
+        $('#bgTools').hidden = false;
+        $('#bgUndo').hidden = true;
+        $('#bgRun').hidden = false;
+        $('#bgMsg').textContent = '';
+        if ($('#bgAuto').checked) runBg();
+        else if (pref('bgUsed') === '1') loadScript('./bgremove.js').then(() => window.BgRemove.init()).catch(() => {}); // 써본 기기는 미리 준비
       } catch (err) {
         $('#pickLabel').textContent = errText(err);
       }
