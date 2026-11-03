@@ -355,3 +355,43 @@ tr.muted td { color: var(--muted); }
 .send-target input { width: 18px; height: 18px; }
 .mc-list { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
 .mc-btn { background: #eef3fb; border-color: #cfdcf0; color: #2a5a9a; }
+
+/* ---------- 가입 안내문 (포스터) ---------- */
+.modal.wide { max-width: 860px; }
+.pe { display: grid; gap: 16px; }
+@media (min-width: 760px) { .pe { grid-template-columns: 1fr 1fr; align-items: start; } }
+.pe-themes { flex-wrap: wrap; }
+.pe-themes button { font-size: 13px; padding: 7px 10px; }
+.pe-preview { display: flex; justify-content: center; background: #e9e3da; border-radius: 10px; padding: 12px; min-height: 200px; }
+#pePrev { position: relative; overflow: hidden; box-shadow: 0 6px 20px rgba(0,0,0,.18); }
+#pePrev > .poster { transform-origin: 0 0; position: absolute; left: 0; top: 0; }
+
+.poster { --u: calc(1mm * var(--k)); box-sizing: border-box; padding: calc(var(--u) * 8); font-family: "Noto Sans KR", "Malgun Gothic", "Apple SD Gothic Neo", sans-serif;
+  -webkit-print-color-adjust: exact; print-color-adjust: exact; overflow: hidden;
+  --bg: #f3ebdd; --ink: #3b2a20; --accent: #9a5b34; --soft: #e7d9c3; --card: #fffaf2; }
+.poster.pt-black { --bg: #1f1a17; --ink: #f4ece1; --accent: #d6a36b; --soft: #3a312b; --card: #ffffff; }
+.poster.pt-minimal { --bg: #ffffff; --ink: #111111; --accent: #111111; --soft: #e6e6e6; --card: #ffffff; }
+.poster.pt-sage { --bg: #e6ece2; --ink: #2f4436; --accent: #5f7f63; --soft: #cfdacb; --card: #fbfdf9; }
+.poster { background: var(--bg); color: var(--ink); }
+.pt-frame { height: 100%; box-sizing: border-box; border: calc(var(--u) * .5) solid var(--accent); outline: calc(var(--u) * .25) solid var(--accent);
+  outline-offset: calc(var(--u) * -2.2); padding: calc(var(--u) * 9) calc(var(--u) * 8) calc(var(--u) * 7);
+  display: flex; flex-direction: column; align-items: center; text-align: center; }
+.pt-minimal .pt-frame { outline: none; border-width: calc(var(--u) * .3); }
+.pt-store { font-family: "Gowun Batang", "Batang", serif; font-weight: 700; font-size: calc(var(--u) * 7.5); letter-spacing: .18em; text-transform: uppercase; }
+.pt-rule { display: flex; align-items: center; gap: calc(var(--u) * 2.5); width: 92%; margin: calc(var(--u) * 2.5) auto 0; color: var(--accent); }
+.pt-rule span { flex: 1; min-width: calc(var(--u) * 10); display: block; border-top: calc(var(--u) * .35) solid currentColor; }
+.pt-rule i { font-style: normal; font-size: calc(var(--u) * 2.6); letter-spacing: .4em; font-weight: 700; }
+.pt-title { font-family: "Gowun Batang", "Batang", serif; font-weight: 700; font-size: calc(var(--u) * 10.5); line-height: 1.28; margin: calc(var(--u) * 9) 0 calc(var(--u) * 4); word-break: keep-all; }
+.pt-perk { display: inline-block; background: var(--accent); color: var(--bg); font-weight: 700; font-size: calc(var(--u) * 4.2);
+  padding: calc(var(--u) * 1.6) calc(var(--u) * 5); border-radius: 999px; margin-bottom: calc(var(--u) * 2); }
+.pt-minimal .pt-perk { color: #fff; }
+.pt-black .pt-perk { color: #1f1a17; }
+.pt-qr { width: 52%; margin: calc(var(--u) * 5) auto calc(var(--u) * 5); background: var(--card); padding: calc(var(--u) * 3); border-radius: calc(var(--u) * 3);
+  box-shadow: 0 0 0 calc(var(--u) * .4) var(--soft); }
+.pt-qr svg { width: 100%; height: auto; display: block; }
+.pt-steps { display: grid; grid-template-columns: repeat(3, 1fr); gap: calc(var(--u) * 3); width: 100%; font-size: calc(var(--u) * 3.3); line-height: 1.35; }
+.pt-steps b { display: flex; align-items: center; justify-content: center; width: calc(var(--u) * 7); height: calc(var(--u) * 7); margin: 0 auto calc(var(--u) * 1.5);
+  border-radius: 50%; background: var(--soft); color: var(--accent); font-size: calc(var(--u) * 3.8); }
+.pt-how { font-size: calc(var(--u) * 3.8); }
+.pt-foot { margin-top: auto; padding-top: calc(var(--u) * 3); font-size: calc(var(--u) * 3.4); letter-spacing: .06em; opacity: .85; }
+@media print { #printArea .poster { box-shadow: none; } }

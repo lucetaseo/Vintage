@@ -1502,7 +1502,7 @@
   async function showJoinQr(storeId) {
     if (!storeId) return toast('매장을 찾을 수 없습니다', 'error');
     await loadScript('./vendor/qrcode-generator-1.4.4.js');
-    const { data: st, error } = await sb.from('stores').select('id, name, biz_name, join_token').eq('id', storeId).maybeSingle();
+    const { data: st, error } = await sb.from('stores').select('id, name, biz_name, join_token, join_poster').eq('id', storeId).maybeSingle();
     if (error || !st) return toast(errText(error || '매장을 찾을 수 없습니다'), 'error');
     const url = `${location.origin}${location.pathname.replace(/[^/]*$/, '')}join.html?s=${st.join_token}`;
     const qr = window.qrcode(0, 'M');
@@ -1518,7 +1518,7 @@
       <div class="row" style="flex-wrap:wrap">
         <button class="btn" data-x>닫기</button>
         <button class="btn" data-copy>링크 복사</button>
-        <button class="btn primary" data-print>🖨 안내문 인쇄</button>
+        <button class="btn primary" data-print>🎨 안내문 꾸미기 / 인쇄</button>
       </div>
       ${
         isAdmin()
@@ -1537,29 +1537,8 @@
           }
         };
         $('[data-print]', bg).onclick = () => {
-          document.getElementById('printArea')?.remove();
-          document.getElementById('printPage')?.remove();
-          const area = document.createElement('div');
-          area.id = 'printArea';
-          area.innerHTML = `<div class="join-poster">
-            <div class="jp-store">${title}</div>
-            <div class="jp-title">회원가입하고<br>포인트 받으세요</div>
-            ${jp ? `<div class="jp-perk">지금 가입하면 ${jp.toLocaleString('ko-KR')}P 적립</div>` : ''}
-            <div class="jp-qr">${svg}</div>
-            <div class="jp-how">휴대폰 카메라로 QR코드를 찍어주세요</div>
-          </div>`;
-          document.body.appendChild(area);
-          const stl = document.createElement('style');
-          stl.id = 'printPage';
-          stl.textContent = '@page { size: A5; margin: 10mm }';
-          document.head.appendChild(stl);
-          const cleanup = () => {
-            area.remove();
-            stl.remove();
-            window.removeEventListener('afterprint', cleanup);
-          };
-          window.addEventListener('afterprint', cleanup);
-          setTimeout(() => window.print(), 50);
+          close();
+          posterEditor(st, svg);
         };
         const rot = $('[data-rotate]', bg);
         if (rot)
@@ -1571,6 +1550,164 @@
             toast('새 QR을 만들었습니다');
             showJoinQr(storeId);
           };
+      }
+    );
+  }
+
+  // ---------------- 가입 안내문 꾸미기 ----------------
+  const POSTER_THEMES = {
+    vintage: '빈티지 크림',
+    black: '블랙',
+    minimal: '미니멀 화이트',
+    sage: '세이지 그린',
+  };
+  const POSTER_PAPERS = { A4: [210, 297], A5: [148, 210], A6: [105, 148] };
+
+  function posterDefaults(st) {
+    const jp = Number(state.settings?.join_points) || 0;
+    const rate = Number(state.settings?.point_rate) || 0;
+    return {
+      theme: 'vintage',
+      paper: 'A5',
+      title: '회원가입하고\n포인트 받으세요',
+      perk: jp ? `지금 가입하면 ${jp.toLocaleString('ko-KR')}P 바로 적립` : rate ? `구매 금액의 ${rate}% 포인트 적립` : '',
+      steps: true,
+      footer: '',
+      ...(st.join_poster || {}),
+    };
+  }
+
+  function posterHtml(st, svg, o) {
+    const [w, h] = POSTER_PAPERS[o.paper] || POSTER_PAPERS.A5;
+    const k = w / 148; // A5 기준 배율
+    const name = esc(st.biz_name || st.name);
+    return `<div class="poster pt-${esc(o.theme)}" style="width:${w}mm;height:${h}mm;--k:${k}">
+      <div class="pt-frame">
+        <div class="pt-top">
+          <div class="pt-store">${name}</div>
+          <div class="pt-rule"><span></span><i>MEMBERSHIP</i><span></span></div>
+        </div>
+        <div class="pt-title">${esc(o.title).replace(/\n/g, '<br>')}</div>
+        ${o.perk ? `<div class="pt-perk">${esc(o.perk)}</div>` : ''}
+        <div class="pt-qr">${svg}</div>
+        ${
+          o.steps
+            ? `<div class="pt-steps"><div><b>1</b>카메라로<br>QR 찍기</div><div><b>2</b>이름·번호<br>입력</div><div><b>3</b>바로<br>적립 완료</div></div>`
+            : '<div class="pt-how">휴대폰 카메라로 QR코드를 찍어주세요</div>'
+        }
+        ${o.footer ? `<div class="pt-foot">${esc(o.footer)}</div>` : ''}
+      </div>
+    </div>`;
+  }
+
+  function loadPosterFonts() {
+    if (!document.getElementById('posterFonts')) {
+      const l = document.createElement('link');
+      l.id = 'posterFonts';
+      l.rel = 'stylesheet';
+      l.href = 'https://fonts.googleapis.com/css2?family=Gowun+Batang:wght@400;700&family=Noto+Sans+KR:wght@400;700;900&display=swap';
+      document.head.appendChild(l);
+    }
+  }
+
+  function posterEditor(st, svg) {
+    loadPosterFonts();
+    const o = posterDefaults(st);
+    modal(
+      `<h3>회원가입 안내문 꾸미기</h3>
+      <div class="pe">
+        <div class="pe-form">
+          <label class="field"><span>테마</span><div class="seg pe-themes">${Object.entries(POSTER_THEMES)
+            .map(([k, v]) => `<button type="button" data-theme="${k}" class="${o.theme === k ? 'active' : ''}">${v}</button>`)
+            .join('')}</div></label>
+          <label class="field"><span>제목 (줄바꿈 가능)</span><textarea id="peTitle" rows="2">${esc(o.title)}</textarea></label>
+          <label class="field"><span>혜택 문구</span><input type="text" id="pePerk" value="${esc(o.perk)}" placeholder="예: 지금 가입하면 2,000P 적립"></label>
+          <label class="field"><span>하단 문구 (인스타그램, 영업시간 등)</span><input type="text" id="peFoot" value="${esc(o.footer)}" placeholder="예: @siso_vintage"></label>
+          <div class="row">
+            <label class="field"><span>용지</span><select id="pePaper">${Object.keys(POSTER_PAPERS)
+              .map((k) => `<option ${o.paper === k ? 'selected' : ''}>${k}</option>`)
+              .join('')}</select></label>
+            <label style="display:flex;gap:8px;align-items:center;margin-top:14px"><input type="checkbox" id="peSteps" ${o.steps ? 'checked' : ''}> 가입 순서 안내</label>
+          </div>
+          <p class="hint">인쇄 창에서 <b>배경 그래픽</b>을 켜고 배율 <b>100%</b>로 인쇄하세요. 대상에서 <b>PDF로 저장</b>을 고르면 파일로도 받을 수 있습니다.</p>
+        </div>
+        <div class="pe-preview"><div id="pePrev"></div></div>
+      </div>
+      <div class="err" data-err></div>
+      <div class="row" style="flex-wrap:wrap">
+        <button class="btn" data-x>닫기</button>
+        ${isAdmin() ? '<button class="btn" data-save>디자인 저장</button>' : ''}
+        <button class="btn primary" data-print>🖨 인쇄</button>
+      </div>`,
+      (bg, close) => {
+        bg.querySelector('.modal').classList.add('wide');
+        const read = () => {
+          o.title = $('#peTitle', bg).value;
+          o.perk = $('#pePerk', bg).value.trim();
+          o.footer = $('#peFoot', bg).value.trim();
+          o.paper = $('#pePaper', bg).value;
+          o.steps = $('#peSteps', bg).checked;
+        };
+        const render = () => {
+          read();
+          const prev = $('#pePrev', bg);
+          prev.innerHTML = posterHtml(st, svg, o);
+          const el = prev.firstElementChild;
+          const box = prev.parentElement;
+          const scale = Math.min(box.clientWidth / el.offsetWidth, 460 / el.offsetHeight, 1);
+          el.style.transform = `scale(${scale})`;
+          prev.style.height = `${el.offsetHeight * scale}px`;
+          prev.style.width = `${el.offsetWidth * scale}px`;
+        };
+        bg.querySelectorAll('[data-theme]').forEach(
+          (b) =>
+            (b.onclick = () => {
+              o.theme = b.dataset.theme;
+              bg.querySelectorAll('[data-theme]').forEach((x) => x.classList.toggle('active', x === b));
+              render();
+            })
+        );
+        ['#peTitle', '#pePerk', '#peFoot'].forEach((sel) => ($(sel, bg).oninput = render));
+        $('#pePaper', bg).onchange = render;
+        $('#peSteps', bg).onchange = render;
+        setTimeout(render, 30);
+        (document.fonts?.ready || Promise.resolve()).then(() => setTimeout(render, 50));
+        $('[data-x]', bg).onclick = () => close();
+        const sv = $('[data-save]', bg);
+        if (sv)
+          sv.onclick = (e) =>
+            busy(e.target, async () => {
+              read();
+              const { error } = await sb
+                .from('stores')
+                .update({ join_poster: { theme: o.theme, paper: o.paper, title: o.title, perk: o.perk, steps: o.steps, footer: o.footer } })
+                .eq('id', st.id);
+              if (error) return ($('[data-err]', bg).textContent = errText(error));
+              st.join_poster = { ...o };
+              toast('디자인을 저장했습니다. 다른 직원도 같은 디자인으로 인쇄합니다');
+            });
+        $('[data-print]', bg).onclick = async () => {
+          read();
+          document.getElementById('printArea')?.remove();
+          document.getElementById('printPage')?.remove();
+          const area = document.createElement('div');
+          area.id = 'printArea';
+          area.innerHTML = posterHtml(st, svg, o);
+          document.body.appendChild(area);
+          const [w, h] = POSTER_PAPERS[o.paper] || POSTER_PAPERS.A5;
+          const stl = document.createElement('style');
+          stl.id = 'printPage';
+          stl.textContent = `@page { size: ${w}mm ${h}mm; margin: 0 }`;
+          document.head.appendChild(stl);
+          const cleanup = () => {
+            area.remove();
+            stl.remove();
+            window.removeEventListener('afterprint', cleanup);
+          };
+          window.addEventListener('afterprint', cleanup);
+          await Promise.race([document.fonts?.ready || Promise.resolve(), new Promise((r) => setTimeout(r, 1500))]);
+          setTimeout(() => window.print(), 80);
+        };
       }
     );
   }

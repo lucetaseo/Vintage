@@ -100,6 +100,7 @@ alter table public.stores add column if not exists toss_merchant_id text not nul
 -- QR 회원가입용 매장별 비밀 코드 (QR 주소에 들어감, 유출 시 관리자가 새로 발급)
 alter table public.stores add column if not exists join_token text not null default replace(gen_random_uuid()::text, '-', '');
 create unique index if not exists stores_join_token_key on public.stores (join_token);
+alter table public.stores add column if not exists join_poster jsonb not null default '{}'::jsonb;  -- 가입 안내문 디자인 (테마·문구)
 alter table public.stores add column if not exists receipt_footer text not null default '빈티지 상품 특성상 교환·환불이 어려울 수 있습니다. 감사합니다.';
 
 -- ---------- 회원 / 포인트 / 쿠폰 (구조만 준비, 화면은 나중에) ----------
