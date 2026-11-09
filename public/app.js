@@ -798,9 +798,13 @@
       `<h1>${p ? '상품 수정' : '상품 등록'}</h1>
       <form class="form" id="pform" autocomplete="off">
         <label class="photo-pick ${p ? 'has' : ''}" id="pick" style="${p ? `background-image:url('${esc(photoUrl(p.photo_path))}')` : ''}">
-          <input type="file" accept="image/*" capture="environment" id="file">
+          <input type="file" accept="image/*" id="file">
           <span id="pickLabel">${p ? '' : '📷 사진 찍기 / 선택'}</span>
         </label>
+        <div class="photo-src">
+          <label class="btn small"><input type="file" accept="image/*" capture="environment" id="fileCam" hidden>📷 사진 찍기</label>
+          <label class="btn small"><input type="file" accept="image/*" id="fileLib" hidden>🖼 앨범에서 선택</label>
+        </div>
         <div class="bg-tools" id="bgTools" hidden>
           <button type="button" class="btn small" id="bgRun">✂️ 배경 지우기</button>
           <button type="button" class="btn small" id="bgUndo" hidden>↩ 원본 사진으로</button>
@@ -872,8 +876,10 @@
       pref('bgAuto', e.target.checked ? '1' : '0');
       if (e.target.checked && srcImg && photo === original) runBg();
     };
-    $('#file').onchange = async (e) => {
+    // 사진 칸(아이폰: 보관함/촬영/파일 선택), 사진 찍기(카메라), 앨범에서 선택 — 모두 같은 처리
+    const onPhoto = async (e) => {
       const file = e.target.files[0];
+      e.target.value = ''; // 같은 사진을 다시 골라도 동작하도록
       if (!file) return;
       $('#pickLabel').textContent = '사진 처리 중…';
       try {
@@ -891,6 +897,7 @@
         $('#pickLabel').textContent = errText(err);
       }
     };
+    ['#file', '#fileCam', '#fileLib'].forEach((sel) => ($(sel).onchange = onPhoto));
     const auto = $('#autoCode');
     const fillCode = async () => {
       const { data, error } = await sb.rpc('suggest_code');

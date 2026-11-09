@@ -403,3 +403,6 @@ tr.muted td { color: var(--muted); }
 .bg-tools { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin: -6px 0 8px; }
 .bg-tools[hidden] { display: none; }
 .bg-auto { display: flex; align-items: center; gap: 8px; font-size: 13px; color: var(--muted); margin-bottom: 14px; }
+
+.photo-src { display: flex; gap: 8px; margin: -6px 0 10px; }
+.photo-src .btn { flex: 1; text-align: center; cursor: pointer; }
