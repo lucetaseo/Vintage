@@ -40,7 +40,15 @@
     t ? new Date(t).toLocaleString('ko-KR', { month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' }) : '-';
   const storeName = (id) => state.storeMap[id]?.name || '-';
   const personName = (id) => state.people[id]?.name || '-';
-  const photoUrl = (path) => (path ? sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : '');
+  // 사진이 없는 상품은 '사진 없음' 그림으로 표시
+  const NO_PHOTO =
+    'data:image/svg+xml;charset=utf-8,' +
+    encodeURIComponent(
+      '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 200 200"><rect width="200" height="200" fill="#ece5dc"/>' +
+        '<path d="M100 62a12 12 0 1 1 12 12c-6 0-12 4-12 10v4l58 34c6 4 3 12-4 12H46c-7 0-10-8-4-12l58-34" fill="none" stroke="#b9ab9b" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>' +
+        '<text x="100" y="168" font-family="sans-serif" font-size="18" fill="#a3968a" text-anchor="middle">사진 없음</text></svg>'
+    );
+  const photoUrl = (path) => (path ? sb.storage.from(BUCKET).getPublicUrl(path).data.publicUrl : NO_PHOTO);
   const ROLE_LABEL = { super: '총관리자', admin: '관리자', manager: '실장', cashier: '캐셔' };
   const PAY_LABEL = { cash: '현금', card: '카드', transfer: '이체' };
   const isCashier = () => state.me?.role === 'cashier';
@@ -797,9 +805,9 @@
       p ? 'list' : 'new',
       `<h1>${p ? '상품 수정' : '상품 등록'}</h1>
       <form class="form" id="pform" autocomplete="off">
-        <label class="photo-pick ${p ? 'has' : ''}" id="pick" style="${p ? `background-image:url('${esc(photoUrl(p.photo_path))}')` : ''}">
+        <label class="photo-pick ${p?.photo_path ? 'has' : ''}" id="pick" style="${p?.photo_path ? `background-image:url('${esc(photoUrl(p.photo_path))}')` : ''}">
           <input type="file" accept="image/*" id="file">
-          <span id="pickLabel">${p ? '' : '📷 사진 찍기 / 선택'}</span>
+          <span id="pickLabel">${p ? (p.photo_path ? '' : '사진 없음 · 눌러서 추가') : '📷 사진 찍기 / 선택<br><small>사진 없이도 등록할 수 있어요</small>'}</span>
         </label>
         <div class="photo-src">
           <label class="btn small"><input type="file" accept="image/*" capture="environment" id="fileCam" hidden>📷 사진 찍기</label>
@@ -911,7 +919,6 @@
     form.onsubmit = async (e) => {
       e.preventDefault();
       $('#ferr').textContent = '';
-      if (!p && !photo) return ($('#ferr').textContent = '상품 사진을 넣어주세요');
       const price = form.price.value.replace(/[^0-9]/g, '');
       const fields = {
         p_code: form.code.value,
@@ -938,8 +945,8 @@
           } else {
             const { data: newId, error } = await sb.rpc('create_product', {
               ...fields,
-              p_photo_path: uploaded.photo_path,
-              p_thumb_path: uploaded.thumb_path,
+              p_photo_path: uploaded?.photo_path ?? null,
+              p_thumb_path: uploaded?.thumb_path ?? null,
             });
             if (error) throw error;
             toast(`${normCode(fields.p_code)} 등록 완료 · 상세 화면에서 [라벨 출력] 가능`);

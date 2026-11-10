@@ -376,7 +376,7 @@ begin
   if v_store is null or not exists (select 1 from stores where id = v_store) then
     raise exception '매장을 선택하세요';
   end if;
-  if p_photo_path is null or p_photo_path = '' then raise exception '상품 사진을 넣어주세요'; end if;
+  -- 사진은 선택 (나중에 상품 수정에서 추가 가능)
 
   select p.status, s.name as store_name into v_dup
     from products p join stores s on s.id = p.store_id where upper(p.code) = v_code;
@@ -387,7 +387,7 @@ begin
 
   insert into products (code, name, price, memo, photo_path, thumb_path, store_id, created_by)
   values (v_code, trim(coalesce(p_name, '')), p_price, trim(coalesce(p_memo, '')),
-          p_photo_path, coalesce(p_thumb_path, p_photo_path), v_store, v_me.id)
+          nullif(p_photo_path, ''), coalesce(nullif(p_thumb_path, ''), nullif(p_photo_path, '')), v_store, v_me.id)
   returning id into v_id;
 
   insert into product_events (product_id, action, user_id, store_id) values (v_id, 'created', v_me.id, v_store);

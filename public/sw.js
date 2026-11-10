@@ -1,6 +1,6 @@
 // 앱 화면 파일을 캐시해서 설치형 앱처럼 빠르게 열리도록 함.
 // 상품 데이터/사진(Supabase)은 캐시하지 않고 항상 최신으로 가져옴.
-const CACHE = 'vintage-v16';
+const CACHE = 'vintage-v17';
 // vendor/ 는 파일명에 버전이 들어 있어 내용이 바뀌지 않음 → 한 번 받으면 기기에 보관 (배경 지우기 모델 등 큰 파일)
 const VENDOR = 'vintage-vendor-v1';
 const SHELL = ['./', './index.html', './style.css', './app.js', './config.js', './vendor/supabase-2.118.0.js', './manifest.webmanifest', './icons/icon-192.png'];
